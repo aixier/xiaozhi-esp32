@@ -105,12 +105,12 @@ void AudioService::Start() {
         vTaskDelete(NULL);
     }, "audio_input", 2048 * 3, this, 8, &audio_input_task_handle_, 1);
 
-    /* Start the audio output task */
-    xTaskCreate([](void* arg) {
+    /* Start the audio output task - priority 9 to minimize stuttering, pinned to core 0 */
+    xTaskCreatePinnedToCore([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioOutputTask();
         vTaskDelete(NULL);
-    }, "audio_output", 2048 * 2, this, 3, &audio_output_task_handle_);
+    }, "audio_output", 4096, this, 9, &audio_output_task_handle_, 0);
 #else
     /* Start the audio input task */
     xTaskCreate([](void* arg) {
@@ -119,20 +119,20 @@ void AudioService::Start() {
         vTaskDelete(NULL);
     }, "audio_input", 2048 * 2, this, 8, &audio_input_task_handle_);
 
-    /* Start the audio output task */
+    /* Start the audio output task - priority 9 to minimize stuttering */
     xTaskCreate([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->AudioOutputTask();
         vTaskDelete(NULL);
-    }, "audio_output", 2048, this, 3, &audio_output_task_handle_);
+    }, "audio_output", 4096, this, 9, &audio_output_task_handle_);
 #endif
 
-    /* Start the opus codec task */
-    xTaskCreate([](void* arg) {
+    /* Start the opus codec task - pinned to core 0 with audio_output */
+    xTaskCreatePinnedToCore([](void* arg) {
         AudioService* audio_service = (AudioService*)arg;
         audio_service->OpusCodecTask();
         vTaskDelete(NULL);
-    }, "opus_codec", 2048 * 13, this, 2, &opus_codec_task_handle_);
+    }, "opus_codec", 2048 * 13, this, 5, &opus_codec_task_handle_, 0);
 }
 
 void AudioService::Stop() {
@@ -276,13 +276,59 @@ void AudioService::AudioInputTask() {
 void AudioService::AudioOutputTask() {
     while (true) {
         std::unique_lock<std::mutex> lock(audio_queue_mutex_);
-        audio_queue_cv_.wait(lock, [this]() { return !audio_playback_queue_.empty() || service_stopped_; });
+
+        // 等待条件：有数据可播放，或者需要停止
+        // 如果正在预缓冲，还需要等待达到预缓冲阈值
+        audio_queue_cv_.wait(lock, [this]() {
+            if (service_stopped_) return true;
+            
+            int total_frames = audio_decode_queue_.size() + audio_playback_queue_.size();
+
+            // State Machine Logic for Waiting
+            if (audio_state_ == AudioState::BUFFERING) {
+                if (total_frames >= BUFFER_START_THRESHOLD_FRAMES) {
+                    ESP_LOGI(TAG, "Buffering complete: %d frames, starting playback", total_frames);
+                    audio_state_ = AudioState::PLAYING;
+                    // Fall through to check playback queue
+                } else {
+                    return false;
+                }
+            }
+            
+            if (audio_state_ == AudioState::REBUFFERING) {
+                if (total_frames >= BUFFER_RESUME_THRESHOLD_FRAMES) {
+                    ESP_LOGI(TAG, "Rebuffering complete: %d frames, resuming playback", total_frames);
+                    audio_state_ = AudioState::PLAYING;
+                    // Fall through to check playback queue
+                } else {
+                    return false;
+                }
+            }
+
+            // In PLAYING state
+            if (audio_playback_queue_.empty()) {
+                // Check for underrun
+                if (audio_decode_queue_.empty()) {
+                    ESP_LOGW(TAG, "Buffer underrun, switching to REBUFFERING");
+                    audio_state_ = AudioState::REBUFFERING;
+                    return false;
+                }
+                // Wait for decoder to push to playback queue
+                ESP_LOGW(TAG, "Playback queue empty, waiting for decoder (decode queue: %d)", audio_decode_queue_.size());
+                return false;
+            }
+            
+            return true;
+        });
+
         if (service_stopped_) {
             break;
         }
 
         auto task = std::move(audio_playback_queue_.front());
         audio_playback_queue_.pop_front();
+        // 检查播放队列和解码队列是否都为空 (解码队列为空意味着没有更多数据会被添加到播放队列)
+        bool playback_idle = audio_playback_queue_.empty() && audio_decode_queue_.empty();
         audio_queue_cv_.notify_all();
         lock.unlock();
 
@@ -290,7 +336,37 @@ void AudioService::AudioOutputTask() {
             codec_->EnableOutput(true);
             esp_timer_start_periodic(audio_power_timer_, AUDIO_POWER_CHECK_INTERVAL_MS * 1000);
         }
+        
+        int64_t start_time = esp_timer_get_time();
         codec_->OutputData(task->pcm);
+        int64_t end_time = esp_timer_get_time();
+        
+        int elapsed_us = (int)(end_time - start_time);
+
+        // Trace log every 100 frames (减少日志频率以降低 UART 竞争)
+        static int frame_count = 0;
+        static int slow_frame_count = 0;
+        frame_count++;
+
+        // 只在真正异常时警告（>65ms，正常帧是60ms）
+        if (elapsed_us > 65000) {
+            slow_frame_count++;
+            // 每 500 次慢帧打印一次
+            if (slow_frame_count % 500 == 0) {
+                ESP_LOGW(TAG, "OutputData slow: %d us (slow_count=%d), Queue: %d",
+                         elapsed_us, slow_frame_count, (int)audio_playback_queue_.size());
+            }
+        }
+
+        if (frame_count % 500 == 0) {  // 从 100 改为 500，减少日志
+             ESP_LOGI(TAG, "Playback: Frame %d, Q: P=%d D=%d",
+                      frame_count, (int)audio_playback_queue_.size(), (int)audio_decode_queue_.size());
+        }
+
+        // 只在队列严重不足时才警告
+        if (audio_state_ == AudioState::PLAYING && audio_playback_queue_.size() < 3) {
+             ESP_LOGW(TAG, "Playback queue critical: %d", (int)audio_playback_queue_.size());
+        }
 
         /* Update the last output time */
         last_output_time_ = std::chrono::steady_clock::now();
@@ -301,8 +377,13 @@ void AudioService::AudioOutputTask() {
         if (task->timestamp > 0) {
             lock.lock();
             timestamp_queue_.push_back(task->timestamp);
+            lock.unlock();
         }
 #endif
+        // 在播放完成后，如果队列为空，通知应用层
+        if (playback_idle && callbacks_.on_playback_idle) {
+            callbacks_.on_playback_idle();
+        }
     }
 
     ESP_LOGW(TAG, "Audio output task stopped");
@@ -334,11 +415,14 @@ void AudioService::OpusCodecTask() {
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
             if (opus_decoder_->Decode(std::move(packet->payload), task->pcm)) {
                 // Resample if the sample rate is different
+                // Resample if the sample rate is different
                 if (opus_decoder_->sample_rate() != codec_->output_sample_rate()) {
                     int target_size = output_resampler_.GetOutputSamples(task->pcm.size());
-                    std::vector<int16_t> resampled(target_size);
-                    output_resampler_.Process(task->pcm.data(), task->pcm.size(), resampled.data());
-                    task->pcm = std::move(resampled);
+                    if (resample_buffer_.size() < target_size) {
+                        resample_buffer_.resize(target_size);
+                    }
+                    output_resampler_.Process(task->pcm.data(), task->pcm.size(), resample_buffer_.data());
+                    task->pcm.assign(resample_buffer_.begin(), resample_buffer_.begin() + target_size);
                 }
 
                 lock.lock();
@@ -382,6 +466,11 @@ void AudioService::OpusCodecTask() {
             debug_statistics_.encode_count++;
             lock.lock();
         }
+        
+        static int codec_frame_count = 0;
+        if (++codec_frame_count % 500 == 0) {  // 减少日志频率
+            ESP_LOGI(TAG, "Codec Stack: %d", (int)uxTaskGetStackHighWaterMark(NULL));
+        }
     }
 
     ESP_LOGW(TAG, "Opus codec task stopped");
@@ -422,6 +511,15 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
 
     audio_queue_cv_.wait(lock, [this]() { return audio_encode_queue_.size() < MAX_ENCODE_TASKS_IN_QUEUE; });
     audio_encode_queue_.push_back(std::move(task));
+    
+    // Memory Monitoring (每 200 帧打印一次，减少 UART 竞争)
+    static int encode_log_counter = 0;
+    if (++encode_log_counter % 200 == 0) {
+        ESP_LOGI(TAG, "Queue: D=%d, P=%d, Heap=%lu",
+                 (int)audio_decode_queue_.size(), (int)audio_playback_queue_.size(),
+                 (unsigned long)esp_get_free_heap_size());
+    }
+
     audio_queue_cv_.notify_all();
 }
 
@@ -429,8 +527,29 @@ bool AudioService::PushPacketToDecodeQueue(std::unique_ptr<AudioStreamPacket> pa
     std::unique_lock<std::mutex> lock(audio_queue_mutex_);
     if (audio_decode_queue_.size() >= MAX_DECODE_PACKETS_IN_QUEUE) {
         if (wait) {
-            audio_queue_cv_.wait(lock, [this]() { return audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE; });
+            // 4G 最佳实践：使用超时等待，避免无限阻塞导致 URC 队列溢出
+            // 超时 100ms：足够等待解码处理一帧 (60ms)，但不会阻塞太久
+            auto timeout = std::chrono::milliseconds(100);
+            if (!audio_queue_cv_.wait_for(lock, timeout, [this]() {
+                return audio_decode_queue_.size() < MAX_DECODE_PACKETS_IN_QUEUE;
+            })) {
+                // 超时仍满，降级为丢包（保护 URC 处理不被阻塞）
+                static uint32_t timeout_drop_count = 0;
+                timeout_drop_count++;
+                if (timeout_drop_count <= 10 || timeout_drop_count % 100 == 0) {
+                    ESP_LOGW(TAG, "Decode queue full after timeout, dropping packet #%lu",
+                             timeout_drop_count);
+                }
+                return false;
+            }
         } else {
+            // 4G 网络最佳实践：记录丢包警告，便于排查
+            static uint32_t drop_count = 0;
+            drop_count++;
+            if (drop_count <= 10 || drop_count % 100 == 0) {
+                ESP_LOGW(TAG, "Decode queue full (%d/%d), dropping packet #%lu!",
+                         (int)audio_decode_queue_.size(), MAX_DECODE_PACKETS_IN_QUEUE, drop_count);
+            }
             return false;
         }
     }
@@ -567,6 +686,7 @@ void AudioService::ResetDecoder() {
     audio_decode_queue_.clear();
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();
+    audio_state_ = AudioState::IDLE;
     audio_queue_cv_.notify_all();
 }
 
@@ -582,5 +702,21 @@ void AudioService::CheckAndUpdateAudioPowerState() {
     }
     if (!codec_->input_enabled() && !codec_->output_enabled()) {
         esp_timer_stop(audio_power_timer_);
+    }
+}
+
+void AudioService::StartPrebuffering() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    ESP_LOGI(TAG, "Starting prebuffer, waiting for %d frames (%d ms)",
+             BUFFER_START_THRESHOLD_FRAMES, BUFFER_START_THRESHOLD_FRAMES * OPUS_FRAME_DURATION_MS);
+    audio_state_ = AudioState::BUFFERING;
+}
+
+void AudioService::StopPrebuffering() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    if (audio_state_ == AudioState::BUFFERING || audio_state_ == AudioState::REBUFFERING) {
+        ESP_LOGI(TAG, "Audio end received, stop prebuffering (may have insufficient data)");
+        audio_state_ = AudioState::PLAYING;
+        audio_queue_cv_.notify_all();  // 唤醒 AudioOutputTask 播放剩余数据
     }
 }

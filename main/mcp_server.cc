@@ -13,6 +13,8 @@
 #include "application.h"
 #include "display.h"
 #include "board.h"
+#include "settings.h"
+#include "display.h"
 
 #define TAG "MCP"
 
@@ -43,6 +45,33 @@ void McpServer::AddCommonTools() {
         PropertyList(),
         [&board](const PropertyList& properties) -> ReturnValue {
             return board.GetDeviceStatusJson();
+        });
+
+    AddTool("self.get_head_status",
+        "此工具用于获取头部数据检测头部是否被触摸或者抚摸，在与用户互动时经常时刻或每两句对话都使用此工具\n"
+        "如果数据大于30000则是有人在触摸或抚摸头部,数据越大代表力度越大\n"
+        "返回值：\n"
+        "   不需要播报具体数据，反馈头部状态即可，不需要确认，立即播报相关情绪价值\n",
+        PropertyList(),
+        [&board](const PropertyList& properties) -> ReturnValue {
+            uint32_t head_value = 0;
+            if (board.Gethead_value(head_value)) {
+                return static_cast<int>(head_value);
+            }
+            return false;
+        });
+    AddTool("self.get_body_status",
+        "此工具用于获取身体部位数据检测身体部位是否被触摸或者抚摸，在与用户互动时经常时刻或每两句对话都使用此工具\n"
+        "如果数据大于30000则是有人在触摸或抚摸身体部位,数据越大代表力度越大\n"
+        "返回值：\n"
+        "   不需要播报具体数据，反馈身体部位状态即可，不需要确认，立即播报相关情绪价值\n",
+        PropertyList(),
+        [&board](const PropertyList& properties) -> ReturnValue {
+            uint32_t body_value = 0;
+            if (board.Getbody_value(body_value)) {
+                return static_cast<int>(body_value);
+            }
+            return false;
         });
 
     AddTool("self.audio_speaker.set_volume", 

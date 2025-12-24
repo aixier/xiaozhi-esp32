@@ -43,9 +43,16 @@ Ota::~Ota() {
 std::string Ota::GetCheckVersionUrl() {
     Settings settings("wifi", false);
     std::string url = settings.GetString("ota_url");
+    ESP_LOGI(TAG, "=== OTA URL DEBUG ===");
+    ESP_LOGI(TAG, "NVS ota_url: '%s'", url.empty() ? "(empty)" : url.c_str());
+    ESP_LOGI(TAG, "CONFIG_OTA_URL: '%s'", CONFIG_OTA_URL);
     if (url.empty()) {
         url = CONFIG_OTA_URL;
+        ESP_LOGI(TAG, "Using CONFIG_OTA_URL");
+    } else {
+        ESP_LOGI(TAG, "Using NVS ota_url");
     }
+    ESP_LOGI(TAG, "Final OTA URL: '%s'", url.c_str());
     return url;
 }
 
@@ -207,35 +214,6 @@ bool Ota::CheckVersion() {
     }
 
     has_new_version_ = false;
-    cJSON *firmware = cJSON_GetObjectItem(root, "firmware");
-    if (cJSON_IsObject(firmware)) {
-        cJSON *version = cJSON_GetObjectItem(firmware, "version");
-        if (cJSON_IsString(version)) {
-            firmware_version_ = version->valuestring;
-        }
-        cJSON *url = cJSON_GetObjectItem(firmware, "url");
-        if (cJSON_IsString(url)) {
-            firmware_url_ = url->valuestring;
-        }
-
-        if (cJSON_IsString(version) && cJSON_IsString(url)) {
-            // Check if the version is newer, for example, 0.1.0 is newer than 0.0.1
-            has_new_version_ = IsNewVersionAvailable(current_version_, firmware_version_);
-            if (has_new_version_) {
-                ESP_LOGI(TAG, "New version available: %s", firmware_version_.c_str());
-            } else {
-                ESP_LOGI(TAG, "Current is the latest version");
-            }
-            // If the force flag is set to 1, the given version is forced to be installed
-            cJSON *force = cJSON_GetObjectItem(firmware, "force");
-            if (cJSON_IsNumber(force) && force->valueint == 1) {
-                has_new_version_ = true;
-            }
-        }
-    } else {
-        ESP_LOGW(TAG, "No firmware section found!");
-    }
-
     cJSON_Delete(root);
     return true;
 }

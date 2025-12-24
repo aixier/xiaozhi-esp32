@@ -1,12 +1,13 @@
 #include "single_led.h"
 #include "application.h"
 #include <esp_log.h> 
+#include "assets/lang_config.h"
 
 #define TAG "SingleLed"
 
-#define DEFAULT_BRIGHTNESS 4
-#define HIGH_BRIGHTNESS 16
-#define LOW_BRIGHTNESS 2
+#define DEFAULT_BRIGHTNESS 255
+#define HIGH_BRIGHTNESS 255
+#define LOW_BRIGHTNESS 0
 
 #define BLINK_INFINITE -1
 
@@ -117,47 +118,79 @@ void SingleLed::OnBlinkTimer() {
 
 
 void SingleLed::OnStateChanged() {
+    int level_ = 0;
+    bool charging_ = false;
+    bool discharging_ = false;
+    bool lowBattery = false;
+
+    auto& board = Board::GetInstance();
     auto& app = Application::GetInstance();
     auto device_state = app.GetDeviceState();
+    if (idle_state_ && board.GetBatteryLevel(level_, charging_, discharging_)) {
+        lowBattery = level_ < 5;
+        if (level_ < 5 && discharging_ && low_p3 == 0) {
+            low_p3 = 1;
+            app.PlaySound(Lang::Sounds::P3_BAT_LOW);
+        }
+        if (level_ > 5 || !discharging_){
+            low_p3 = 0;
+        }
+    }
+    
     switch (device_state) {
         case kDeviceStateStarting:
+            if (!idle_state_) {
+                idle_state_ = true;
+            }
             SetColor(0, 0, DEFAULT_BRIGHTNESS);
             StartContinuousBlink(100);
             break;
         case kDeviceStateWifiConfiguring:
-            SetColor(0, 0, DEFAULT_BRIGHTNESS);
+            SetColor(0, 0, DEFAULT_BRIGHTNESS); 
             StartContinuousBlink(500);
             break;
         case kDeviceStateIdle:
-            TurnOff();
-            break;
-        case kDeviceStateConnecting:
-            SetColor(0, 0, DEFAULT_BRIGHTNESS);
-            TurnOn();
-            break;
-        case kDeviceStateListening:
-        case kDeviceStateAudioTesting:
-            if (app.IsVoiceDetected()) {
-                SetColor(HIGH_BRIGHTNESS, 0, 0);
+            
+            if (lowBattery && discharging_) {
+                SetColor(DEFAULT_BRIGHTNESS, 0, 0); 
             } else {
-                SetColor(LOW_BRIGHTNESS, 0, 0);
+                SetColor(DEFAULT_BRIGHTNESS, DEFAULT_BRIGHTNESS, DEFAULT_BRIGHTNESS);
             }
             TurnOn();
             break;
+        case kDeviceStateConnecting:
+            SetColor(0, 0, DEFAULT_BRIGHTNESS); 
+            TurnOn();
+            break;
+        case kDeviceStateListening:
+            if (lowBattery && discharging_) {
+                SetColor(DEFAULT_BRIGHTNESS, 0, 0);
+            } else {
+                SetColor(DEFAULT_BRIGHTNESS, DEFAULT_BRIGHTNESS, DEFAULT_BRIGHTNESS);
+            }
+            StartContinuousBlink(300); 
+            break;
         case kDeviceStateSpeaking:
-            SetColor(0, DEFAULT_BRIGHTNESS, 0);
+            if (lowBattery && discharging_) {
+                SetColor(DEFAULT_BRIGHTNESS, 0, 0); 
+            } else {
+                SetColor(0, DEFAULT_BRIGHTNESS, 0); 
+            }
             TurnOn();
             break;
         case kDeviceStateUpgrading:
-            SetColor(0, DEFAULT_BRIGHTNESS, 0);
+            SetColor(0, DEFAULT_BRIGHTNESS, 0); 
             StartContinuousBlink(100);
             break;
         case kDeviceStateActivating:
-            SetColor(0, DEFAULT_BRIGHTNESS, 0);
+            SetColor(0, DEFAULT_BRIGHTNESS, 0); 
             StartContinuousBlink(500);
             break;
         default:
             ESP_LOGW(TAG, "Unknown led strip event: %d", device_state);
-            return;
+            break;
+    }
+    if (lowBattery && discharging_) {
+        SetColor(DEFAULT_BRIGHTNESS, 0, 0); 
     }
 }

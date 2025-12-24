@@ -1,5 +1,11 @@
-set(SOURCES "audio/audio_codec.cc"
+set(SOURCES "core/event_bus.cc"
+            "core/event_bridge.cc"
+            "network/at_scheduler.cc"
+            "network/connection_manager.cc"
+            "audio/audio_codec.cc"
             "audio/audio_service.cc"
+            "audio/playback_controller.cc"
+            "audio/audio_player.cc"
             "audio/codecs/no_audio_codec.cc"
             "audio/codecs/box_audio_codec.cc"
             "audio/codecs/es8311_audio_codec.cc"
@@ -14,6 +20,8 @@ set(SOURCES "audio/audio_codec.cc"
             "display/display.cc"
             "display/lcd_display.cc"
             "display/oled_display.cc"
+            "display/emotion_state.cc"
+            "display/display_engine.cc"
             "protocols/protocol.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
@@ -26,7 +34,7 @@ set(SOURCES "audio/audio_codec.cc"
             "main.cc"
             )
 
-set(INCLUDE_DIRS "." "display" "audio" "protocols")
+set(INCLUDE_DIRS "." "core" "network" "display" "audio" "protocols")
 
 # 添加板级公共文件
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)
@@ -198,6 +206,8 @@ elseif(CONFIG_BOARD_TYPE_MINSI_K08_DUAL)
     set(BOARD_TYPE "minsi-k08-dual")
 elseif(CONFIG_BOARD_TYPE_ZHENGCHEN_1_54TFT_ML307)
     set(BOARD_TYPE "zhengchen-1.54tft-ml307")
+elseif(CONFIG_BOARD_TYPE_ZHENGCHEN_EYE)
+    set(BOARD_TYPE "zhengchen_eye")
 elseif(CONFIG_BOARD_TYPE_ESP32_S3_1_54_MUMA)
     set(BOARD_TYPE "sp-esp32-s3-1.54-muma")
 elseif(CONFIG_BOARD_TYPE_ESP32_S3_1_28_BOX)
@@ -252,6 +262,23 @@ set(LANG_JSON "${CMAKE_CURRENT_SOURCE_DIR}/assets/${LANG_DIR}/language.json")
 set(LANG_HEADER "${CMAKE_CURRENT_SOURCE_DIR}/assets/lang_config.h")
 file(GLOB LANG_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/${LANG_DIR}/*.p3)
 file(GLOB COMMON_SOUNDS ${CMAKE_CURRENT_SOURCE_DIR}/assets/common/*.p3)
+
+if(CONFIG_USE_LCD_240X240_GIF1) 
+    file(GLOB GIF_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/assets/gif1_240/*.c)
+    list(APPEND SOURCES ${GIF_SOURCES})
+elseif(CONFIG_USE_LCD_240X240_GIF2)
+        file(GLOB GIF_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/assets/gif2_240/*.c)
+        list(APPEND SOURCES ${GIF_SOURCES})
+elseif(CONFIG_USE_LCD_160X160_GIF1)
+    file(GLOB GIF_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/assets/gif1_160/*.c)
+    list(APPEND SOURCES ${GIF_SOURCES})
+elseif(CONFIG_USE_LCD_160X160_GIF2)
+    file(GLOB GIF_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/assets/gif2_160/*.c)
+    list(APPEND SOURCES ${GIF_SOURCES})
+elseif(CONFIG_USE_NOLCD)
+    file(GLOB GIF_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/assets/gif2_160/*.c)
+    list(APPEND SOURCES ${GIF_SOURCES})
+endif()
 
 # 如果目标芯片是 ESP32，则排除特定文件
 if(CONFIG_IDF_TARGET_ESP32)

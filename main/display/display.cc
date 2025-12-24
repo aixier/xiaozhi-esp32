@@ -154,32 +154,21 @@ void Display::UpdateStatusBar(bool update_all) {
             lv_label_set_text(battery_label_, battery_icon_);
         }
 
-        if (low_battery_popup_ != nullptr) {
-            if (strcmp(icon, FONT_AWESOME_BATTERY_EMPTY) == 0 && discharging) {
-                if (lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) { // 如果低电量提示框隐藏，则显示
-                    lv_obj_clear_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
-                    app.PlaySound(Lang::Sounds::P3_LOW_BATTERY);
-                }
-            } else {
-                // Hide the low battery popup when the battery is not empty
-                if (!lv_obj_has_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN)) { // 如果低电量提示框显示，则隐藏
-                    lv_obj_add_flag(low_battery_popup_, LV_OBJ_FLAG_HIDDEN);
-                }
-            }
-        }
     }
 
     // 每 10 秒更新一次网络图标
     static int seconds_counter = 0;
     if (update_all || seconds_counter++ % 10 == 0) {
-        // 升级固件时，不读取 4G 网络状态，避免占用 UART 资源
+        // 升级固件和 WebSocket 通信时，不读取 4G 网络状态，避免 AT 命令冲突导致断连
+        // kDeviceStateListening/kDeviceStateSpeaking/kDeviceStateConnecting 时正在进行 WebSocket 通信
         auto device_state = Application::GetInstance().GetDeviceState();
         static const std::vector<DeviceState> allowed_states = {
             kDeviceStateIdle,
             kDeviceStateStarting,
             kDeviceStateWifiConfiguring,
-            kDeviceStateListening,
             kDeviceStateActivating,
+            // 注意: kDeviceStateListening 和 kDeviceStateSpeaking 不在此列表中
+            // 因为这些状态下正在进行 WebSocket 通信，AT 命令会干扰数据传输
         };
         if (std::find(allowed_states.begin(), allowed_states.end(), device_state) != allowed_states.end()) {
             icon = board.GetNetworkStateIcon();
@@ -256,8 +245,10 @@ void Display::SetPreviewImage(const lv_img_dsc_t* image) {
 }
 
 void Display::SetChatMessage(const char* role, const char* content) {
+    ESP_LOGW("Display", "BASE SetChatMessage called! role=%s, content=%s", role, content);
     DisplayLockGuard lock(this);
     if (chat_message_label_ == nullptr) {
+        ESP_LOGW("Display", "BASE SetChatMessage: chat_message_label_ is NULL");
         return;
     }
     lv_label_set_text(chat_message_label_, content);

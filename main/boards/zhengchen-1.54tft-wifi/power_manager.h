@@ -19,7 +19,7 @@ private:
 
     gpio_num_t charging_pin_ = GPIO_NUM_NC;
     std::vector<uint16_t> adc_values_;
-    uint32_t battery_level_ = 0;
+    uint32_t battery_level_ = 50;
     bool is_charging_ = false;
     bool is_low_battery_ = false;
     float current_temperature_ = 0.0f;
@@ -65,7 +65,7 @@ private:
     void ReadBatteryAdcData() {
         // 读取 ADC 值
         int adc_value;
-        ESP_ERROR_CHECK(adc_oneshot_read(adc_handle_, ADC_CHANNEL_7, &adc_value));
+        ESP_ERROR_CHECK(adc_oneshot_read(adc_handle_, ADC_CHANNEL_5, &adc_value));
        
         
         // 将 ADC 值添加到队列中
@@ -75,7 +75,7 @@ private:
         }
         uint32_t average_adc = 0;
         for (auto value : adc_values_) {
-            average_adc += (value + 80);
+            average_adc += (value);
         }
         average_adc /= adc_values_.size();
 
@@ -85,12 +85,12 @@ private:
             uint16_t adc;
             uint8_t level;
         } levels[] = {
-            {2030, 0},
-            {2134, 20},
-            {2252, 40},
-            {2370, 60},
-            {2488, 80},
-            {2606, 100}
+            {1730, 0},
+            {1778, 20},
+            {1826, 40},
+            {1874, 60},
+            {1922, 80},
+            {1970, 100},    
         };
         // 低于最低值时
         if (average_adc < levels[0].adc) {
@@ -174,7 +174,7 @@ public:
             .atten = ADC_ATTEN_DB_12,
             .bitwidth = ADC_BITWIDTH_12,
         };
-        ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle_, ADC_CHANNEL_7, &chan_config));
+        ESP_ERROR_CHECK(adc_oneshot_config_channel(adc_handle_, ADC_CHANNEL_5, &chan_config));
 
         // 初始化温度传感器
         temperature_sensor_config_t temp_config = {

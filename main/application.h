@@ -16,6 +16,7 @@
 #include "ota.h"
 #include "audio_service.h"
 #include "device_state_event.h"
+#include "display/display_engine.h"
 
 #define MAIN_EVENT_SCHEDULE (1 << 0)
 #define MAIN_EVENT_SEND_AUDIO (1 << 1)
@@ -23,6 +24,7 @@
 #define MAIN_EVENT_VAD_CHANGE (1 << 3)
 #define MAIN_EVENT_ERROR (1 << 4)
 #define MAIN_EVENT_CHECK_NEW_VERSION_DONE (1 << 5)
+#define MAIN_EVENT_PLAYBACK_IDLE (1 << 6)
 
 enum AecMode {
     kAecOff,
@@ -75,9 +77,11 @@ private:
     AecMode aec_mode_ = kAecOff;
     std::string last_error_message_;
     AudioService audio_service_;
+    DisplayEngine display_engine_;
 
     bool has_server_time_ = false;
     bool aborted_ = false;
+    bool waiting_for_playback_complete_ = false;  // 等待 TTS 播放完成后再切换状态
     int clock_ticks_ = 0;
     TaskHandle_t check_new_version_task_handle_ = nullptr;
 

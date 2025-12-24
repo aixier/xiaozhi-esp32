@@ -36,11 +36,15 @@
 
 #define OPUS_FRAME_DURATION_MS 60
 #define MAX_ENCODE_TASKS_IN_QUEUE 2
-#define MAX_PLAYBACK_TASKS_IN_QUEUE 2
-#define MAX_DECODE_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
+#define MAX_PLAYBACK_TASKS_IN_QUEUE 10  // 4G需要更大缓冲
+#define MAX_DECODE_PACKETS_IN_QUEUE 200 // 4G网络：12秒缓冲 (200*60ms)
 #define MAX_SEND_PACKETS_IN_QUEUE (2400 / OPUS_FRAME_DURATION_MS)
 #define AUDIO_TESTING_MAX_DURATION_MS 10000
 #define MAX_TIMESTAMPS_IN_QUEUE 3
+
+// Buffering Configuration - 4G网络需要更大预缓冲
+#define BUFFER_START_THRESHOLD_FRAMES 10   // 600ms 预缓冲启动
+#define BUFFER_RESUME_THRESHOLD_FRAMES 5   // 300ms 恢复缓冲
 
 #define AUDIO_POWER_TIMEOUT_MS 15000
 #define AUDIO_POWER_CHECK_INTERVAL_MS 1000
@@ -56,6 +60,7 @@ struct AudioServiceCallbacks {
     std::function<void(const std::string&)> on_wake_word_detected;
     std::function<void(bool)> on_vad_change;
     std::function<void(void)> on_audio_testing_queue_full;
+    std::function<void(void)> on_playback_idle;  // 当播放队列从非空变为空时触发
 };
 
 
@@ -63,6 +68,13 @@ enum AudioTaskType {
     kAudioTaskTypeEncodeToSendQueue,
     kAudioTaskTypeEncodeToTestingQueue,
     kAudioTaskTypeDecodeToPlaybackQueue,
+};
+
+enum class AudioState {
+    IDLE,           // No audio session
+    BUFFERING,      // Initial buffering
+    PLAYING,        // Playing audio
+    REBUFFERING     // Buffer underrun, waiting for data
 };
 
 struct AudioTask {
@@ -107,6 +119,10 @@ public:
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
 
+    // 预缓冲控制
+    void StartPrebuffering();  // 收到 AUDIO_START 时调用
+    void StopPrebuffering();   // 收到 AUDIO_END 时调用
+
 private:
     AudioCodec* codec_ = nullptr;
     AudioServiceCallbacks callbacks_;
@@ -118,6 +134,7 @@ private:
     OpusResampler input_resampler_;
     OpusResampler reference_resampler_;
     OpusResampler output_resampler_;
+    std::vector<int16_t> resample_buffer_;
     DebugStatistics debug_statistics_;
 
     EventGroupHandle_t event_group_;
@@ -141,6 +158,10 @@ private:
     bool voice_detected_ = false;
     bool service_stopped_ = true;
     bool audio_input_need_warmup_ = false;
+
+    // 预缓冲控制：收到足够音频数据后再开始播放，避免断断续续
+    // 4G 网络抖动可达 2 秒以上，需要足够的预缓冲来平滑播放
+    AudioState audio_state_ = AudioState::IDLE;
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;

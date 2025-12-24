@@ -8,6 +8,8 @@
 #include "font_awesome_symbols.h"
 #include "assets/lang_config.h"
 #include "mcp_server.h"
+#include "core/event_bridge.h"
+#include "settings.h"
 
 #include <cstring>
 #include <esp_log.h>
@@ -32,6 +34,33 @@ static const char* const STATE_STRINGS[] = {
     "fatal_error",
     "invalid_state"
 };
+
+// 简短状态标识，用于 AT 命令日志
+static const char* const STATE_SHORT[] = {
+    "?",   // unknown
+    "ST",  // starting
+    "CF",  // configuring
+    "I",   // idle
+    "C",   // connecting
+    "L",   // listening  ← 关键状态
+    "S",   // speaking   ← 关键状态
+    "U",   // upgrading
+    "A",   // activating
+    "T",   // audio_testing
+    "E",   // fatal_error
+    "X"    // invalid
+};
+
+// 实现 AtUart 弱符号，供 AT 命令日志使用
+// 这样可以在日志中看到 AT 命令发送时的设备状态
+extern "C" const char* AtUart_GetDeviceStateString() {
+    auto& app = Application::GetInstance();
+    int state = static_cast<int>(app.GetDeviceState());
+    if (state >= 0 && state < (int)(sizeof(STATE_SHORT) / sizeof(STATE_SHORT[0]))) {
+        return STATE_SHORT[state];
+    }
+    return "?";
+}
 
 Application::Application() {
     event_group_ = xEventGroupCreate();
@@ -210,7 +239,10 @@ void Application::Alert(const char* status, const char* message, const char* emo
     ESP_LOGW(TAG, "Alert %s: %s [%s]", status, message, emotion);
     auto display = Board::GetInstance().GetDisplay();
     display->SetStatus(status);
-    display->SetEmotion(emotion);
+    // 使用事件系统设置表情，支持过渡动画
+    if (emotion && strlen(emotion) > 0) {
+        EventBridge::EmitSetEmotion(emotion);
+    }
     display->SetChatMessage("system", message);
     if (!sound.empty()) {
         audio_service_.PlaySound(sound);
@@ -221,48 +253,62 @@ void Application::DismissAlert() {
     if (device_state_ == kDeviceStateIdle) {
         auto display = Board::GetInstance().GetDisplay();
         display->SetStatus(Lang::Strings::STANDBY);
-        display->SetEmotion("neutral");
+        EventBridge::EmitSetEmotion("neutral");
         display->SetChatMessage("system", "");
     }
 }
 
 void Application::ToggleChatState() {
+    ESP_LOGI(TAG, "[ToggleChatState] >> Enter, state=%d", device_state_);
     if (device_state_ == kDeviceStateActivating) {
         SetDeviceState(kDeviceStateIdle);
+        ESP_LOGI(TAG, "[ToggleChatState] << Exit (Activating->Idle)");
         return;
     } else if (device_state_ == kDeviceStateWifiConfiguring) {
         audio_service_.EnableAudioTesting(true);
         SetDeviceState(kDeviceStateAudioTesting);
+        ESP_LOGI(TAG, "[ToggleChatState] << Exit (WifiConfiguring->AudioTesting)");
         return;
     } else if (device_state_ == kDeviceStateAudioTesting) {
         audio_service_.EnableAudioTesting(false);
         SetDeviceState(kDeviceStateWifiConfiguring);
+        ESP_LOGI(TAG, "[ToggleChatState] << Exit (AudioTesting->WifiConfiguring)");
         return;
     }
 
     if (!protocol_) {
-        ESP_LOGE(TAG, "Protocol not initialized");
+        ESP_LOGE(TAG, "[ToggleChatState] Protocol not initialized");
         return;
     }
 
     if (device_state_ == kDeviceStateIdle) {
+        ESP_LOGI(TAG, "[ToggleChatState] Idle, scheduling connection...");
         Schedule([this]() {
+            ESP_LOGI(TAG, "[ToggleChatState:Schedule] >> Executing in main loop");
             if (!protocol_->IsAudioChannelOpened()) {
                 SetDeviceState(kDeviceStateConnecting);
+                ESP_LOGI(TAG, "[ToggleChatState:Schedule] Opening audio channel...");
                 if (!protocol_->OpenAudioChannel()) {
+                    ESP_LOGE(TAG, "[ToggleChatState:Schedule] OpenAudioChannel failed");
                     return;
                 }
+                ESP_LOGI(TAG, "[ToggleChatState:Schedule] Audio channel opened");
             }
 
             SetListeningMode(aec_mode_ == kAecOff ? kListeningModeAutoStop : kListeningModeRealtime);
+            ESP_LOGI(TAG, "[ToggleChatState:Schedule] << Done");
         });
     } else if (device_state_ == kDeviceStateSpeaking) {
+        ESP_LOGI(TAG, "[ToggleChatState] Speaking, scheduling abort...");
         Schedule([this]() {
             AbortSpeaking(kAbortReasonNone);
         });
     } else if (device_state_ == kDeviceStateListening) {
+        ESP_LOGI(TAG, "[ToggleChatState] Listening, scheduling stop...");
+        // 停止监听但保持连接，等待服务器的 LLM/TTS 响应
         Schedule([this]() {
-            protocol_->CloseAudioChannel();
+            protocol_->SendStopListening();
+            SetDeviceState(kDeviceStateIdle);
         });
     }
 }
@@ -333,9 +379,31 @@ void Application::Start() {
     /* Setup the display */
     auto display = board.GetDisplay();
 
+    /* Initialize the display engine with emotion transitions */
+    DisplayEngine::Callbacks display_cbs;
+    display_cbs.set_emotion = [display](const std::string& emotion) {
+        display->SetEmotion(emotion.c_str());
+    };
+    display_cbs.set_brightness = [](int brightness) {
+        // TODO: 实现亮度控制
+        ESP_LOGD(TAG, "Set brightness: %d", brightness);
+    };
+    display_cbs.set_status = [display](const std::string& status) {
+        display->SetStatus(status.c_str());
+    };
+    display_engine_.SetCallbacks(display_cbs);
+    display_engine_.Initialize(display);
+    ESP_LOGI(TAG, "DisplayEngine initialized with emotion transitions");
+
     /* Setup the audio service */
     auto codec = board.GetAudioCodec();
     audio_service_.Initialize(codec);
+    
+    // Initialize volume
+    Settings settings("audio", false);
+    int volume = settings.GetInt("volume", 70);
+    codec->SetOutputVolume(volume);
+    
     audio_service_.Start();
 
     AudioServiceCallbacks callbacks;
@@ -347,6 +415,9 @@ void Application::Start() {
     };
     callbacks.on_vad_change = [this](bool speaking) {
         xEventGroupSetBits(event_group_, MAIN_EVENT_VAD_CHANGE);
+    };
+    callbacks.on_playback_idle = [this]() {
+        xEventGroupSetBits(event_group_, MAIN_EVENT_PLAYBACK_IDLE);
     };
     audio_service_.SetCallbacks(callbacks);
 
@@ -383,8 +454,17 @@ void Application::Start() {
         xEventGroupSetBits(event_group_, MAIN_EVENT_ERROR);
     });
     protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
-        if (device_state_ == kDeviceStateSpeaking) {
-            audio_service_.PushPacketToDecodeQueue(std::move(packet));
+        // 接受 Speaking, Idle, 或 Listening 状态的音频
+        // Listening/Idle 状态：刚收到 AUDIO_START 但 Schedule 还没执行完
+        if (device_state_ == kDeviceStateSpeaking ||
+            device_state_ == kDeviceStateIdle ||
+            device_state_ == kDeviceStateListening) {
+            // 如果不是 Speaking 状态，立即切换
+            if (device_state_ != kDeviceStateSpeaking) {
+                SetDeviceState(kDeviceStateSpeaking);
+            }
+            // 4G 最佳实践：使用阻塞模式，等待解码完成，避免丢包
+            audio_service_.PushPacketToDecodeQueue(std::move(packet), true);
         }
     });
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
@@ -408,6 +488,8 @@ void Application::Start() {
         if (strcmp(type->valuestring, "tts") == 0) {
             auto state = cJSON_GetObjectItem(root, "state");
             if (strcmp(state->valuestring, "start") == 0) {
+                // 开始预缓冲：收到足够音频数据后再播放，避免断断续续
+                audio_service_.StartPrebuffering();
                 Schedule([this]() {
                     aborted_ = false;
                     if (device_state_ == kDeviceStateIdle || device_state_ == kDeviceStateListening) {
@@ -415,12 +497,23 @@ void Application::Start() {
                     }
                 });
             } else if (strcmp(state->valuestring, "stop") == 0) {
+                // 停止预缓冲，播放剩余数据
+                audio_service_.StopPrebuffering();
                 Schedule([this]() {
                     if (device_state_ == kDeviceStateSpeaking) {
-                        if (listening_mode_ == kListeningModeManualStop) {
-                            SetDeviceState(kDeviceStateIdle);
+                        // 设置等待播放完成标志，让音频播放完再切换状态
+                        // MAIN_EVENT_PLAYBACK_IDLE 事件会在播放队列为空时触发状态切换
+                        if (audio_service_.IsIdle()) {
+                            // 如果播放队列已空，立即切换状态
+                            if (listening_mode_ == kListeningModeManualStop) {
+                                SetDeviceState(kDeviceStateIdle);
+                            } else {
+                                SetDeviceState(kDeviceStateListening);
+                            }
                         } else {
-                            SetDeviceState(kDeviceStateListening);
+                            // 播放队列非空，等待播放完成
+                            ESP_LOGI(TAG, "TTS stop received, waiting for playback to complete");
+                            waiting_for_playback_complete_ = true;
                         }
                     }
                 });
@@ -428,25 +521,39 @@ void Application::Start() {
                 auto text = cJSON_GetObjectItem(root, "text");
                 if (cJSON_IsString(text)) {
                     ESP_LOGI(TAG, "<< %s", text->valuestring);
-                    Schedule([this, display, message = std::string(text->valuestring)]() {
-                        display->SetChatMessage("assistant", message.c_str());
+                    Schedule([this, message = std::string(text->valuestring)]() {
+                        EventBridge::EmitSetText(message.c_str(), "assistant");
                     });
+                }
+                // Parse emotion from TTS
+                auto emotion = cJSON_GetObjectItem(root, "emotion");
+                if (cJSON_IsString(emotion)) {
+                    ESP_LOGI(TAG, "Received emotion from TTS: %s", emotion->valuestring);
+                    EventBridge::EmitSetEmotion(emotion->valuestring);
                 }
             }
         } else if (strcmp(type->valuestring, "stt") == 0) {
             auto text = cJSON_GetObjectItem(root, "text");
             if (cJSON_IsString(text)) {
                 ESP_LOGI(TAG, ">> %s", text->valuestring);
-                Schedule([this, display, message = std::string(text->valuestring)]() {
-                    display->SetChatMessage("user", message.c_str());
+                Schedule([this, message = std::string(text->valuestring)]() {
+                    EventBridge::EmitSetText(message.c_str(), "user");
                 });
             }
         } else if (strcmp(type->valuestring, "llm") == 0) {
+            // 处理 LLM 文本消息 (流式)
+            auto text = cJSON_GetObjectItem(root, "text");
+            if (cJSON_IsString(text) && strlen(text->valuestring) > 0) {
+                ESP_LOGI(TAG, "<< %s", text->valuestring);
+                Schedule([this, message = std::string(text->valuestring)]() {
+                    EventBridge::EmitSetText(message.c_str(), "assistant");
+                });
+            }
+            // 处理情感 (可选) - 使用事件系统实现过渡动画
             auto emotion = cJSON_GetObjectItem(root, "emotion");
             if (cJSON_IsString(emotion)) {
-                Schedule([this, display, emotion_str = std::string(emotion->valuestring)]() {
-                    display->SetEmotion(emotion_str.c_str());
-                });
+                ESP_LOGI(TAG, "Received emotion from server: %s", emotion->valuestring);
+                EventBridge::EmitSetEmotion(emotion->valuestring);
             }
         } else if (strcmp(type->valuestring, "mcp") == 0) {
             auto payload = cJSON_GetObjectItem(root, "payload");
@@ -503,7 +610,6 @@ void Application::Start() {
         // Play the success sound to indicate the device is ready
         audio_service_.PlaySound(Lang::Sounds::P3_SUCCESS);
     }
-
     // Print heap stats
     SystemInfo::PrintHeapStats();
 }
@@ -516,19 +622,28 @@ void Application::OnClockTimer() {
 
     // Print the debug info every 10 seconds
     if (clock_ticks_ % 10 == 0) {
-        // SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
-        // SystemInfo::PrintTaskList();
-        SystemInfo::PrintHeapStats();
+        //SystemInfo::PrintTaskCpuUsage(pdMS_TO_TICKS(1000));
+        //SystemInfo::PrintTaskList();
+        //SystemInfo::PrintHeapStats();
+        //SystemInfo::PrintPsramHeapStats();
+        //SystemInfo::MonitorCpuUsage();
     }
 }
 
 // Add a async task to MainLoop
 void Application::Schedule(std::function<void()> callback) {
+    ESP_LOGI(TAG, "[Schedule] >> Acquiring mutex...");
+    auto start = esp_timer_get_time();
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        auto elapsed = (esp_timer_get_time() - start) / 1000;
+        if (elapsed > 10) {
+            ESP_LOGW(TAG, "[Schedule] Mutex acquired after %lld ms", elapsed);
+        }
         main_tasks_.push_back(std::move(callback));
     }
     xEventGroupSetBits(event_group_, MAIN_EVENT_SCHEDULE);
+    ESP_LOGI(TAG, "[Schedule] << Task queued");
 }
 
 // The Main Event Loop controls the chat state and websocket connection
@@ -543,16 +658,29 @@ void Application::MainEventLoop() {
             MAIN_EVENT_SEND_AUDIO |
             MAIN_EVENT_WAKE_WORD_DETECTED |
             MAIN_EVENT_VAD_CHANGE |
-            MAIN_EVENT_ERROR, pdTRUE, pdFALSE, portMAX_DELAY);
+            MAIN_EVENT_ERROR |
+            MAIN_EVENT_PLAYBACK_IDLE, pdTRUE, pdFALSE, portMAX_DELAY);
         if (bits & MAIN_EVENT_ERROR) {
             SetDeviceState(kDeviceStateIdle);
             Alert(Lang::Strings::ERROR, last_error_message_.c_str(), "sad", Lang::Sounds::P3_EXCLAMATION);
         }
 
         if (bits & MAIN_EVENT_SEND_AUDIO) {
-            while (auto packet = audio_service_.PopPacketFromSendQueue()) {
-                if (!protocol_->SendAudio(std::move(packet))) {
-                    break;
+            // 在 Speaking 状态时暂停发送 ASR 音频，减少 UART 竞争导致的卡顿
+            if (device_state_ == kDeviceStateSpeaking) {
+                // 清空队列，避免溢出（静默丢弃，不打印日志以减少 UART 竞争）
+                int discarded = 0;
+                while (audio_service_.PopPacketFromSendQueue()) { discarded++; }
+                // 每 10 次才打印一次，减少日志量
+                static int discard_log_counter = 0;
+                if (discarded > 0 && ++discard_log_counter % 10 == 0) {
+                    ESP_LOGD(TAG, "Speaking: discarded %d ASR packets", discarded);
+                }
+            } else {
+                while (auto packet = audio_service_.PopPacketFromSendQueue()) {
+                    if (!protocol_->SendAudio(std::move(packet))) {
+                        break;
+                    }
                 }
             }
         }
@@ -574,6 +702,19 @@ void Application::MainEventLoop() {
             lock.unlock();
             for (auto& task : tasks) {
                 task();
+            }
+        }
+
+        if (bits & MAIN_EVENT_PLAYBACK_IDLE) {
+            // 播放队列已空，如果正在等待播放完成，则切换状态
+            if (waiting_for_playback_complete_ && device_state_ == kDeviceStateSpeaking) {
+                waiting_for_playback_complete_ = false;
+                ESP_LOGI(TAG, "Playback complete, switching to listening mode");
+                if (listening_mode_ == kListeningModeManualStop) {
+                    SetDeviceState(kDeviceStateIdle);
+                } else {
+                    SetDeviceState(kDeviceStateListening);
+                }
             }
         }
     }
@@ -649,23 +790,25 @@ void Application::SetDeviceState(DeviceState state) {
         case kDeviceStateUnknown:
         case kDeviceStateIdle:
             display->SetStatus(Lang::Strings::STANDBY);
-            display->SetEmotion("neutral");
+            EventBridge::EmitSetEmotion("neutral");
             audio_service_.EnableVoiceProcessing(false);
             audio_service_.EnableWakeWordDetection(true);
             break;
         case kDeviceStateConnecting:
             display->SetStatus(Lang::Strings::CONNECTING);
-            display->SetEmotion("neutral");
+            EventBridge::EmitSetEmotion("thinking");
             display->SetChatMessage("system", "");
             break;
         case kDeviceStateListening:
             display->SetStatus(Lang::Strings::LISTENING);
-            display->SetEmotion("neutral");
+            EventBridge::EmitSetEmotion("neutral");
+
+            // Always send listen message when entering listening state
+            // (even if audio processor is already running, e.g., after reconnection)
+            protocol_->SendStartListening(listening_mode_);
 
             // Make sure the audio processor is running
             if (!audio_service_.IsAudioProcessorRunning()) {
-                // Send the start listening command
-                protocol_->SendStartListening(listening_mode_);
                 audio_service_.EnableVoiceProcessing(true);
                 audio_service_.EnableWakeWordDetection(false);
             }
@@ -744,20 +887,18 @@ void Application::SendMcpMessage(const std::string& payload) {
 void Application::SetAecMode(AecMode mode) {
     aec_mode_ = mode;
     Schedule([this]() {
-        auto& board = Board::GetInstance();
-        auto display = board.GetDisplay();
         switch (aec_mode_) {
         case kAecOff:
             audio_service_.EnableDeviceAec(false);
-            display->ShowNotification(Lang::Strings::RTC_MODE_OFF);
+            PlaySound(Lang::Sounds::P3_AEC_OFF);
             break;
         case kAecOnServerSide:
             audio_service_.EnableDeviceAec(false);
-            display->ShowNotification(Lang::Strings::RTC_MODE_ON);
+            PlaySound(Lang::Sounds::P3_AEC_NO);
             break;
         case kAecOnDeviceSide:
             audio_service_.EnableDeviceAec(true);
-            display->ShowNotification(Lang::Strings::RTC_MODE_ON);
+            PlaySound(Lang::Sounds::P3_AEC_NO);
             break;
         }
 

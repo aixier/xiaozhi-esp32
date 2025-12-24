@@ -32,11 +32,16 @@ protected:
     lv_obj_t* status_bar_ = nullptr;
     lv_obj_t* content_ = nullptr;
     lv_obj_t* container_ = nullptr;
+    lv_obj_t* overlay_container = nullptr;
     lv_obj_t* side_bar_ = nullptr;
     lv_obj_t* preview_image_ = nullptr;
 
     DisplayFonts fonts_;
     ThemeColors current_theme_;
+
+protected:
+    lv_obj_t* gif_label_ = nullptr;
+    DisplayMode display_mode_ = kDisplayModeChat;
 
     void SetupUI();
     virtual bool Lock(int timeout_ms = 0) override;
@@ -51,12 +56,12 @@ public:
     virtual void SetEmotion(const char* emotion) override;
     virtual void SetIcon(const char* icon) override;
     virtual void SetPreviewImage(const lv_img_dsc_t* img_dsc) override;
-#if CONFIG_USE_WECHAT_MESSAGE_STYLE
-    virtual void SetChatMessage(const char* role, const char* content) override; 
-#endif  
 
     // Add theme switching function
     virtual void SetTheme(const std::string& theme_name) override;
+
+    // Set display mode
+    virtual void SetDisplayMode(DisplayMode mode);
 };
 
 // RGB LCD显示器

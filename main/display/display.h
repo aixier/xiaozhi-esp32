@@ -15,6 +15,12 @@ struct DisplayFonts {
     const lv_font_t* emoji_font = nullptr;
 };
 
+// Display mode enum
+enum DisplayMode {
+    kDisplayModeChat,
+    kDisplayModeEmotion
+};
+
 class Display {
 public:
     Display();
@@ -31,6 +37,7 @@ public:
     virtual std::string GetTheme() { return current_theme_name_; }
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
+    virtual void SetDisplayMode(DisplayMode mode) {}
 
     inline int width() const { return width_; }
     inline int height() const { return height_; }
@@ -43,6 +50,7 @@ protected:
     lv_display_t *display_ = nullptr;
 
     lv_obj_t *emotion_label_ = nullptr;
+    lv_obj_t *gif_label_ = nullptr;
     lv_obj_t *network_label_ = nullptr;
     lv_obj_t *status_label_ = nullptr;
     lv_obj_t *notification_label_ = nullptr;

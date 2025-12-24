@@ -745,22 +745,133 @@ payload = data[4:4 + payload_len]
 | 帧时长 | 60ms | 60ms | |
 | 帧大小 | 960 samples | 960 samples | |
 
-**重要配置 (xiaozhi-server/config.py)**:
-```python
-# TTS 配置 (必须与设备端 Opus 解码器匹配)
-tts_format: str = "opus"      # 不能用 mp3/wav，设备无法解码
-tts_sample_rate: int = 16000  # 不能用 22050/24000，设备期望 16000
+### 5.4 TTS 配置要求 (关键！)
+
+**服务器环境变量 (.env)**:
+```bash
+# TTS 配置 - 必须正确配置，否则设备无声音！
+TTS_MODEL=cosyvoice-v2          # cosyvoice-v1 不支持 opus 格式
+TTS_VOICE=longxiaochun_v2       # v2 模型需要使用 _v2 后缀的音色
+TTS_FORMAT=opus                 # 必须是 opus，设备只有 Opus 解码器
+TTS_SAMPLE_RATE=16000           # 必须是 16000，匹配设备期望
 ```
 
-**常见错误**:
-- TTS 输出 MP3 格式 → 设备无法解码，无声音
-- TTS 采样率 22050/24000 → 设备解码失败或播放异常
+**模型与音色对应关系**:
+| 模型 | 支持格式 | 音色后缀 |
+|------|---------|---------|
+| cosyvoice-v1 | mp3, wav, pcm | 无后缀 (如 `longxiaochun`) |
+| cosyvoice-v2 | mp3, wav, pcm, **opus** | _v2 后缀 (如 `longxiaochun_v2`) |
+
+**TTS 输出格式处理**:
+- DashScope CosyVoice 返回 **Ogg/Opus 容器**，不是 raw Opus 帧
+- 服务器需要解析 Ogg 容器，提取 raw Opus 帧后发送给设备
+- 使用 `OggOpusParser` 类 (`services/opus_ogg.py`) 进行解析
+
+```python
+# websocket.py 中的处理流程
+from xiaozhi_server.services.opus_ogg import OggOpusParser
+
+ogg_parser = OggOpusParser()
+for ogg_chunk in tts_service.synthesize_streaming_text(...):
+    # 从 Ogg 容器提取 raw Opus 帧
+    for opus_frame in ogg_parser.parse(ogg_chunk):
+        await conn.send_binary(MessageType.AUDIO_DATA, opus_frame)
+```
+
+**常见错误与排查**:
+| 现象 | 原因 | 解决方案 |
+|------|------|---------|
+| 设备无声音，日志显示收到音频 | TTS 返回 MP3 格式 | 检查 TTS_MODEL/TTS_FORMAT |
+| TTS 报错 418 | 音色与模型不匹配 | v2 模型用 _v2 音色 |
+| 0 Opus frames 提取 | 未正确解析 Ogg 容器 | 检查 OggOpusParser |
+| 音频断断续续 | 采样率不匹配 | 确保 TTS_SAMPLE_RATE=16000 |
 
 ---
 
-## 第六部分：关键代码索引
+## 第六部分：设备状态机与音频接收
 
-### 6.1 设备端文件清单
+### 6.1 设备状态定义
+
+```cpp
+enum DeviceState {
+    kDeviceStateIdle,       // 空闲状态
+    kDeviceStateListening,  // 录音中
+    kDeviceStateSpeaking,   // 播放中
+};
+```
+
+### 6.2 状态转换图
+
+```
+                    唤醒/按钮
+         ┌─────────────────────────┐
+         ▼                         │
+    ┌─────────┐   开始录音    ┌────────────┐
+    │  Idle   │──────────────▶│ Listening  │
+    └─────────┘               └────────────┘
+         ▲                         │
+         │                         │ 收到 AUDIO_START
+         │                         ▼
+         │                    ┌────────────┐
+         │◀───────────────────│ Speaking   │
+         │   收到 AUDIO_END   └────────────┘
+```
+
+### 6.3 音频接收的竞态条件修复 (关键！)
+
+**问题描述**：
+服务器发送 `AUDIO_START` 后立即发送 `AUDIO_DATA`，但设备端使用 `Schedule()` 异步切换状态，
+导致音频数据到达时设备仍在 `Listening` 状态，音频被丢弃。
+
+```
+时序问题:
+服务器: AUDIO_START → AUDIO_DATA → AUDIO_DATA → ...
+设备:   Listening ─(Schedule异步)─▶ Speaking
+                    │
+                    └── AUDIO_DATA 到达时仍在 Listening → 被丢弃！
+```
+
+**解决方案** (`main/application.cc`):
+
+```cpp
+// 修复前：只接受 Speaking 或 Idle 状态的音频
+protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
+    if (device_state_ == kDeviceStateSpeaking || device_state_ == kDeviceStateIdle) {
+        audio_service_.PushPacketToDecodeQueue(std::move(packet));
+    }
+});
+
+// 修复后：也接受 Listening 状态的音频，并立即切换状态
+protocol_->OnIncomingAudio([this](std::unique_ptr<AudioStreamPacket> packet) {
+    if (device_state_ == kDeviceStateSpeaking ||
+        device_state_ == kDeviceStateIdle ||
+        device_state_ == kDeviceStateListening) {  // 新增
+        // 如果不是 Speaking 状态，立即切换
+        if (device_state_ != kDeviceStateSpeaking) {
+            SetDeviceState(kDeviceStateSpeaking);
+        }
+        audio_service_.PushPacketToDecodeQueue(std::move(packet));
+    }
+});
+```
+
+### 6.4 BinaryProtocol3 消息类型
+
+```cpp
+// 服务器 → 设备 (下行)
+0x10: AUDIO_START   // 音频开始，设备进入 Speaking 状态
+0x11: AUDIO_DATA    // 音频数据 (raw Opus 帧)
+0x12: AUDIO_END     // 音频结束，设备返回 Idle/Listening 状态
+0x20: TEXT_ASR      // ASR 识别文本 (JSON payload)
+0x21: TEXT_LLM      // LLM 回复文本 (JSON payload)
+0x0F: ERROR         // 错误消息
+```
+
+---
+
+## 第七部分：关键代码索引
+
+### 7.1 设备端文件清单
 
 | 文件 | 行号 | 功能 |
 |------|------|------|
@@ -775,7 +886,7 @@ tts_sample_rate: int = 16000  # 不能用 22050/24000，设备期望 16000
 | `main/protocols/protocol.h` | 17-24 | BinaryProtocol2 定义 |
 | `main/protocols/protocol.h` | 26-31 | BinaryProtocol3 定义 |
 
-### 6.2 云端文件清单
+### 7.2 云端文件清单
 
 | 文件 | 行号 | 功能 |
 |------|------|------|

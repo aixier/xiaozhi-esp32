@@ -1,0 +1,12 @@
+{
+    "target": "esp32s3",
+    "builds": [
+        {
+            "name": "zhengchen_eye",
+            "sdkconfig_append": [
+                "CONFIG_USE_DEVICE_AEC=y",
+                "CONFIG_USE_WECHAT_MESSAGE_STYLE=y"
+            ]
+        }
+    ]
+}

@@ -141,5 +141,17 @@ void SystemInfo::PrintTaskList() {
 void SystemInfo::PrintHeapStats() {
     int free_sram = heap_caps_get_free_size(MALLOC_CAP_INTERNAL);
     int min_free_sram = heap_caps_get_minimum_free_size(MALLOC_CAP_INTERNAL);
-    ESP_LOGI(TAG, "free sram: %u minimal sram: %u", free_sram, min_free_sram);
+    ESP_LOGE(TAG, "free sram: %u minimal sram: %u", free_sram, min_free_sram);
+}
+
+void SystemInfo::PrintPsramHeapStats() {
+    int free_psram = heap_caps_get_free_size(MALLOC_CAP_SPIRAM);
+    int min_free_psram = heap_caps_get_minimum_free_size(MALLOC_CAP_SPIRAM);
+    ESP_LOGE(TAG, "free psram: %u minimal psram: %u", free_psram, min_free_psram);
+}
+
+void SystemInfo::MonitorCpuUsage() {
+    char stats_buf[512];
+    vTaskGetRunTimeStats(stats_buf); // 获取所有任务CPU占用率
+    ESP_LOGE(TAG, "%s\n", stats_buf);       // 输出格式：任务名 | 运行时间 | 占用百分比
 }

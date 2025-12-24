@@ -8,30 +8,72 @@
 #include <esp_ota_ops.h>
 #include <esp_chip_info.h>
 #include <esp_random.h>
+#include <esp_mac.h>
+#if CONFIG_IDF_TARGET_ESP32P4
+#include <esp_wifi.h>
+#endif
 
 #define TAG "Board"
 
 Board::Board() {
     Settings settings("board", true);
-    uuid_ = settings.GetString("uuid");
-    if (uuid_.empty()) {
-        uuid_ = GenerateUuid();
+
+    // 始终基于 MAC 地址生成 UUID，确保 Client-Id 永远固定
+    std::string mac_based_uuid = GenerateUuid();
+    std::string stored_uuid = settings.GetString("uuid");
+
+    if (stored_uuid.empty() || stored_uuid != mac_based_uuid) {
+        // 首次启动或旧的随机 UUID，更新为基于 MAC 的 UUID
+        uuid_ = mac_based_uuid;
         settings.SetString("uuid", uuid_);
+        if (!stored_uuid.empty()) {
+            ESP_LOGI(TAG, "UUID updated from %s to %s (MAC-based)",
+                     stored_uuid.c_str(), uuid_.c_str());
+        }
+    } else {
+        uuid_ = stored_uuid;
     }
+
     ESP_LOGI(TAG, "UUID=%s SKU=%s", uuid_.c_str(), BOARD_NAME);
 }
 
 std::string Board::GenerateUuid() {
-    // UUID v4 需要 16 字节的随机数据
+    // 基于 MAC 地址生成固定 UUID，确保每次烧录后 Client-Id 不变
+    // 格式：xxxxxxxx-xxxx-5xxx-yxxx-xxxxxxxxxxxx (UUID v5 风格)
+
+    // 获取 MAC 地址 (6 字节)
+    uint8_t mac[6];
+#if CONFIG_IDF_TARGET_ESP32P4
+    esp_wifi_get_mac(WIFI_IF_STA, mac);
+#else
+    esp_efuse_mac_get_default(mac);
+#endif
+
+    // 构建 16 字节的 UUID 数据
+    // 前 10 字节：基于 MAC 地址的确定性填充
+    // 后 6 字节：MAC 地址本身
     uint8_t uuid[16];
-    
-    // 使用 ESP32 的硬件随机数生成器
-    esp_fill_random(uuid, sizeof(uuid));
-    
-    // 设置版本 (版本 4) 和变体位
-    uuid[6] = (uuid[6] & 0x0F) | 0x40;    // 版本 4
-    uuid[8] = (uuid[8] & 0x3F) | 0x80;    // 变体 1
-    
+
+    // 使用 MAC 地址的字节异或生成前缀
+    uuid[0] = mac[0] ^ mac[5];
+    uuid[1] = mac[1] ^ mac[4];
+    uuid[2] = mac[2] ^ mac[3];
+    uuid[3] = mac[0] ^ mac[2] ^ mac[4];
+    uuid[4] = mac[1] ^ mac[3] ^ mac[5];
+    uuid[5] = mac[0] ^ mac[1] ^ mac[2];
+    uuid[6] = 0x50 | (mac[3] & 0x0F);    // 版本 5 (基于名称)
+    uuid[7] = mac[3] ^ mac[4] ^ mac[5];
+    uuid[8] = 0x80 | (mac[4] & 0x3F);    // 变体 1
+    uuid[9] = mac[0] ^ mac[5];
+
+    // 后 6 字节直接使用 MAC 地址
+    uuid[10] = mac[0];
+    uuid[11] = mac[1];
+    uuid[12] = mac[2];
+    uuid[13] = mac[3];
+    uuid[14] = mac[4];
+    uuid[15] = mac[5];
+
     // 将字节转换为标准的 UUID 字符串格式
     char uuid_str[37];
     snprintf(uuid_str, sizeof(uuid_str),
@@ -40,7 +82,8 @@ std::string Board::GenerateUuid() {
         uuid[4], uuid[5], uuid[6], uuid[7],
         uuid[8], uuid[9], uuid[10], uuid[11],
         uuid[12], uuid[13], uuid[14], uuid[15]);
-    
+
+    ESP_LOGI(TAG, "Generated UUID from MAC: %s", uuid_str);
     return std::string(uuid_str);
 }
 
@@ -49,6 +92,14 @@ bool Board::GetBatteryLevel(int &level, bool& charging, bool& discharging) {
 }
 
 bool Board::GetTemperature(float& esp32temp){
+    return false;
+}
+
+bool Board::Gethead_value(uint32_t& head_value){
+    return false;
+}
+
+bool Board::Getbody_value(uint32_t& body_value){
     return false;
 }
 

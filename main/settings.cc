@@ -85,3 +85,22 @@ void Settings::EraseAll() {
         ESP_LOGW(TAG, "Namespace %s is not open for writing", ns_.c_str());
     }
 }
+
+// 从NVS读取模式标志位
+int32_t Settings::read_mode_flag() {
+    nvs_handle_t nvs_handle;
+    int32_t mode;
+    ESP_ERROR_CHECK(nvs_open("config", NVS_READWRITE, &nvs_handle));
+    nvs_get_i32(nvs_handle, "mode", &mode); // 读取键为"mode"的值
+    nvs_close(nvs_handle);
+    return mode;
+}
+
+// 写入模式标志位到NVS
+void Settings::write_mode_flag(int32_t mode) {
+    nvs_handle_t nvs_handle;
+    ESP_ERROR_CHECK(nvs_open("config", NVS_READWRITE, &nvs_handle));
+    nvs_set_i32(nvs_handle, "mode", mode);
+    nvs_commit(nvs_handle); // 提交写入
+    nvs_close(nvs_handle);
+}

@@ -1,10 +1,11 @@
 #include "wifi_board.h"
-#include "codecs/box_audio_codec.h"
+#include "audio_codecs/box_audio_codec.h"
 #include "display/lcd_display.h"
 #include "application.h"
 #include "button.h"
 #include "config.h"
 #include "i2c_device.h"
+#include "iot/thing_manager.h"
 #include "esp32_camera.h"
 
 #include <esp_log.h>
@@ -247,7 +248,6 @@ public:
         InitializeTouch();
         InitializeButtons();
         InitializeCamera();
-
         GetBacklight()->RestoreBrightness();
     }
 

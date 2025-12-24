@@ -11,6 +11,8 @@ public:
     bool IsChargingDone();
     int GetBatteryLevel();
     float GetTemperature();
+    uint32_t Gethead_value();
+    uint32_t Getbody_value();
     void PowerOff();
 
 private:
