@@ -239,11 +239,8 @@ void Application::Alert(const char* status, const char* message, const char* emo
     ESP_LOGW(TAG, "Alert %s: %s [%s]", status, message, emotion);
     auto display = Board::GetInstance().GetDisplay();
     display->SetStatus(status);
-    // 使用事件系统设置表情，支持过渡动画
-    if (emotion && strlen(emotion) > 0) {
-        EventBridge::EmitSetEmotion(emotion);
-    }
-    display->SetChatMessage("system", message);
+    // 使用 Alert 模式：表情 + 文字叠加显示
+    display->SetAlert(emotion, message);
     if (!sound.empty()) {
         audio_service_.PlaySound(sound);
     }
@@ -253,8 +250,9 @@ void Application::DismissAlert() {
     if (device_state_ == kDeviceStateIdle) {
         auto display = Board::GetInstance().GetDisplay();
         display->SetStatus(Lang::Strings::STANDBY);
+        // 恢复到表情模式
+        display->SetDisplayMode(kDisplayModeEmotion);
         EventBridge::EmitSetEmotion("neutral");
-        display->SetChatMessage("system", "");
     }
 }
 

@@ -17,8 +17,9 @@ struct DisplayFonts {
 
 // Display mode enum
 enum DisplayMode {
-    kDisplayModeChat,
-    kDisplayModeEmotion
+    kDisplayModeChat,       // 聊天模式：显示文字消息
+    kDisplayModeEmotion,    // 表情模式：全屏 GIF
+    kDisplayModeAlert       // 警告模式：表情 + 文字叠加
 };
 
 class Display {
@@ -38,6 +39,7 @@ public:
     virtual void UpdateStatusBar(bool update_all = false);
     virtual void SetPowerSaveMode(bool on);
     virtual void SetDisplayMode(DisplayMode mode) {}
+    virtual void SetAlert(const char* emotion, const char* message) {}
 
     inline int width() const { return width_; }
     inline int height() const { return height_; }

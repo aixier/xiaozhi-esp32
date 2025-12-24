@@ -43,6 +43,12 @@ protected:
     lv_obj_t* gif_label_ = nullptr;
     DisplayMode display_mode_ = kDisplayModeChat;
 
+    // Alert mode UI elements
+    lv_obj_t* alert_container_ = nullptr;
+    lv_obj_t* alert_gif_ = nullptr;
+    lv_obj_t* alert_message_label_ = nullptr;
+    esp_timer_handle_t alert_timer_ = nullptr;
+
     void SetupUI();
     virtual bool Lock(int timeout_ms = 0) override;
     virtual void Unlock() override;
@@ -61,7 +67,10 @@ public:
     virtual void SetTheme(const std::string& theme_name) override;
 
     // Set display mode
-    virtual void SetDisplayMode(DisplayMode mode);
+    virtual void SetDisplayMode(DisplayMode mode) override;
+
+    // Set alert content (emotion + message overlay)
+    virtual void SetAlert(const char* emotion, const char* message);
 };
 
 // RGB LCD显示器

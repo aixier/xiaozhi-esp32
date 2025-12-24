@@ -419,8 +419,51 @@ void LcdDisplay::SetupUI() {
 #endif
     lv_obj_set_size(gif_label_, LV_HOR_RES, LV_VER_RES);
     lv_obj_align(gif_label_, LV_ALIGN_CENTER, 0, 0);
-    ESP_LOGI(TAG, "GIF initialized, size=%dx%d", (int)LV_HOR_RES, (int)LV_VER_RES); 
-   
+    ESP_LOGI(TAG, "GIF initialized, size=%dx%d", (int)LV_HOR_RES, (int)LV_VER_RES);
+
+    /* Alert container - for emotion + text overlay mode */
+    ESP_LOGI(TAG, "Creating alert container...");
+    alert_container_ = lv_obj_create(screen);
+    lv_obj_remove_style_all(alert_container_);
+    lv_obj_set_size(alert_container_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_set_style_bg_color(alert_container_, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(alert_container_, LV_OPA_COVER, 0);
+    lv_obj_align(alert_container_, LV_ALIGN_CENTER, 0, 0);
+    lv_obj_add_flag(alert_container_, LV_OBJ_FLAG_HIDDEN);
+    ESP_LOGI(TAG, "Alert container created");
+
+    // Alert GIF - full screen size (same as emotion mode)
+    alert_gif_ = lv_gif_create(alert_container_);
+#if CONFIG_USE_LCD_240X240_GIF1 || CONFIG_USE_LCD_160X160_GIF1
+    lv_gif_set_src(alert_gif_, &happy);
+#else
+    lv_gif_set_src(alert_gif_, &neutral);
+#endif
+    lv_obj_set_size(alert_gif_, LV_HOR_RES, LV_VER_RES);
+    lv_obj_align(alert_gif_, LV_ALIGN_CENTER, 0, 0);
+    ESP_LOGI(TAG, "Alert GIF created, full screen size");
+
+    // Alert message container - bottom overlay with semi-transparent background
+    lv_obj_t* alert_msg_bg = lv_obj_create(alert_container_);
+    lv_obj_remove_style_all(alert_msg_bg);
+    lv_obj_set_size(alert_msg_bg, LV_HOR_RES, LV_SIZE_CONTENT);
+    lv_obj_set_style_bg_color(alert_msg_bg, lv_color_black(), 0);
+    lv_obj_set_style_bg_opa(alert_msg_bg, LV_OPA_70, 0);  // 70% opacity
+    lv_obj_set_style_pad_all(alert_msg_bg, 8, 0);
+    lv_obj_set_style_radius(alert_msg_bg, 0, 0);
+    lv_obj_align(alert_msg_bg, LV_ALIGN_BOTTOM_MID, 0, 0);
+
+    // Alert message label - inside the semi-transparent background
+    alert_message_label_ = lv_label_create(alert_msg_bg);
+    lv_label_set_text(alert_message_label_, "");
+    lv_obj_set_width(alert_message_label_, LV_HOR_RES - 16);
+    lv_label_set_long_mode(alert_message_label_, LV_LABEL_LONG_WRAP);
+    lv_obj_set_style_text_align(alert_message_label_, LV_TEXT_ALIGN_CENTER, 0);
+    lv_obj_set_style_text_color(alert_message_label_, lv_color_white(), 0);
+    lv_obj_set_style_text_font(alert_message_label_, fonts_.text_font, 0);
+    lv_obj_center(alert_message_label_);
+    ESP_LOGI(TAG, "Alert message label created with overlay style");
+
     /* Content */
     content_ = lv_obj_create(container_);
     lv_obj_set_scrollbar_mode(content_, LV_SCROLLBAR_MODE_OFF);
@@ -648,11 +691,22 @@ void LcdDisplay::SetDisplayMode(DisplayMode mode) {
         if (container_ != nullptr) lv_obj_clear_flag(container_, LV_OBJ_FLAG_HIDDEN);
         // Hide Emotion UI
         if (overlay_container != nullptr) lv_obj_add_flag(overlay_container, LV_OBJ_FLAG_HIDDEN);
-    } else {
+        // Hide Alert UI
+        if (alert_container_ != nullptr) lv_obj_add_flag(alert_container_, LV_OBJ_FLAG_HIDDEN);
+    } else if (mode == kDisplayModeEmotion) {
         // Hide Chat UI
         if (container_ != nullptr) lv_obj_add_flag(container_, LV_OBJ_FLAG_HIDDEN);
         // Show Emotion UI
         if (overlay_container != nullptr) lv_obj_clear_flag(overlay_container, LV_OBJ_FLAG_HIDDEN);
+        // Hide Alert UI
+        if (alert_container_ != nullptr) lv_obj_add_flag(alert_container_, LV_OBJ_FLAG_HIDDEN);
+    } else if (mode == kDisplayModeAlert) {
+        // Hide Chat UI
+        if (container_ != nullptr) lv_obj_add_flag(container_, LV_OBJ_FLAG_HIDDEN);
+        // Hide Emotion UI
+        if (overlay_container != nullptr) lv_obj_add_flag(overlay_container, LV_OBJ_FLAG_HIDDEN);
+        // Show Alert UI
+        if (alert_container_ != nullptr) lv_obj_clear_flag(alert_container_, LV_OBJ_FLAG_HIDDEN);
     }
 }
 
@@ -780,4 +834,117 @@ void LcdDisplay::SetTheme(const std::string& theme_name) {
 
     // No errors occurred. Save theme to settings
     Display::SetTheme(theme_name);
+}
+
+void LcdDisplay::SetAlert(const char* emotion, const char* message) {
+    ESP_LOGI(TAG, ">>> LcdDisplay::SetAlert: emotion='%s', message='%s'",
+             emotion ? emotion : "NULL", message ? message : "NULL");
+
+    struct Emotion {
+        const lv_img_dsc_t* gif;
+        const char* text;
+    };
+#if CONFIG_USE_LCD_240X240_GIF1 || CONFIG_USE_LCD_160X160_GIF1
+    static const std::vector<Emotion> emotions = {
+        {&happy, "neutral"},
+        {&happy, "happy"},
+        {&happy, "laughing"},
+        {&happy, "funny"},
+        {&sad, "sad"},
+        {&angry, "angry"},
+        {&sad, "crying"},
+        {&love, "loving"},
+        {&confused, "embarrassed"},
+        {&delicious, "surprised"},
+        {&delicious, "shocked"},
+        {&thinking, "thinking"},
+        {&cool, "winking"},
+        {&cool, "cool"},
+        {&happy, "relaxed"},
+        {&delicious, "delicious"},
+        {&love, "kissy"},
+        {&confused, "confident"},
+        {&sleepy, "sleepy"},
+        {&delicious, "silly"},
+        {&confused, "confused"}
+    };
+#else
+    static const std::vector<Emotion> emotions = {
+        {&neutral, "neutral"},
+        {&happy, "happy"},
+        {&happy, "laughing"},
+        {&happy, "funny"},
+        {&neutral, "sad"},
+        {&angry, "angry"},
+        {&neutral, "crying"},
+        {&love, "loving"},
+        {&confused, "embarrassed"},
+        {&confused, "surprised"},
+        {&winking, "shocked"},
+        {&confused, "thinking"},
+        {&winking, "winking"},
+        {&winking, "cool"},
+        {&happy, "relaxed"},
+        {&winking, "delicious"},
+        {&love, "kissy"},
+        {&confused, "confident"},
+        {&sleepy, "sleepy"},
+        {&neutral, "silly"},
+        {&confused, "confused"}
+    };
+#endif
+
+    // Cancel any existing alert timer
+    if (alert_timer_ != nullptr) {
+        esp_timer_stop(alert_timer_);
+        esp_timer_delete(alert_timer_);
+        alert_timer_ = nullptr;
+    }
+
+    {
+        DisplayLockGuard lock(this);
+
+        // Set alert emotion GIF
+        if (alert_gif_ != nullptr && emotion != nullptr) {
+            std::string_view emotion_view(emotion);
+            auto it = std::find_if(emotions.begin(), emotions.end(),
+                [&emotion_view](const Emotion& e) { return e.text == emotion_view; });
+
+            if (it != emotions.end()) {
+                lv_gif_set_src(alert_gif_, it->gif);
+            } else {
+#if CONFIG_USE_LCD_240X240_GIF1 || CONFIG_USE_LCD_160X160_GIF1
+                lv_gif_set_src(alert_gif_, &happy);
+#else
+                lv_gif_set_src(alert_gif_, &neutral);
+#endif
+            }
+        }
+
+        // Set alert message
+        if (alert_message_label_ != nullptr && message != nullptr) {
+            lv_label_set_text(alert_message_label_, message);
+        }
+
+        // Switch to Alert display mode
+        display_mode_ = kDisplayModeAlert;
+        if (container_ != nullptr) lv_obj_add_flag(container_, LV_OBJ_FLAG_HIDDEN);
+        if (overlay_container != nullptr) lv_obj_add_flag(overlay_container, LV_OBJ_FLAG_HIDDEN);
+        if (alert_container_ != nullptr) lv_obj_clear_flag(alert_container_, LV_OBJ_FLAG_HIDDEN);
+    }
+
+    // Create timer to auto-dismiss after 3 seconds
+    esp_timer_create_args_t timer_args = {
+        .callback = [](void* arg) {
+            LcdDisplay* display = static_cast<LcdDisplay*>(arg);
+            ESP_LOGI("LcdDisplay", "Alert timer expired, switching to Emotion mode");
+            display->SetDisplayMode(kDisplayModeEmotion);
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "alert_timer",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&timer_args, &alert_timer_);
+    esp_timer_start_once(alert_timer_, 3000000);  // 3 seconds in microseconds
 }
