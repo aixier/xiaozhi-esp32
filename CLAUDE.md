@@ -197,15 +197,71 @@ W AudioService: Decode queue full  # 队列满丢包
 
 **详细文档**: [MODULE_AUDIO.md 第13节](docs/MODULE_AUDIO.md)
 
+### Always Online 常驻在线模式
+
+**功能**: 设备启动后自动连接服务器，保持在线状态，不进入待机模式。
+
+**启用方式**:
+```
+CONFIG_ALWAYS_ONLINE=y  # 在 sdkconfig 或 menuconfig 中启用
+```
+
+**实现要点**:
+
+1. **启动自动连接** (`application.cc`):
+   - 在 `protocol_->Start()` 后调用 `OpenAudioChannel()`
+   - 成功后进入 Listening 状态
+
+2. **断线自动重连** (`OnAudioChannelClosed` 回调):
+   - WebSocket 断开后延迟 1 秒自动重连
+   - 避免频繁重试导致资源耗尽
+
+3. **保持监听状态**:
+   - TTS 播放完毕后保持 Listening（不回到 Idle）
+   - 按键停止监听后保持连接等待响应
+
+**关键代码位置**:
+```cpp
+// application.cc - 启动自动连接
+#if CONFIG_ALWAYS_ONLINE
+    ESP_LOGI(TAG, "Always Online mode enabled, auto-connecting to server...");
+    Schedule([this]() {
+        if (!protocol_->IsAudioChannelOpened()) {
+            SetDeviceState(kDeviceStateConnecting);
+            if (protocol_->OpenAudioChannel()) {
+                SetDeviceState(kDeviceStateListening);
+            }
+        }
+    });
+#endif
+```
+
+**经验总结**:
+- Kconfig 选项添加后需重新编译才生效
+- 使用条件编译 `#if CONFIG_ALWAYS_ONLINE` 保持向后兼容
+- 断线重连需要延迟，避免 4G 模块连接风暴
+
 ---
 
-## 禁止操作
+## 禁止操作 ⚠️
 
-| 命令 | 原因 |
-|------|------|
-| `stty -F /dev/ttyACM0` | 卡死终端 |
-| `miniterm` | WSL 不可用 |
-| `screen /dev/ttyACM0` | 可能卡死 |
+> **严格禁止**: 以下命令会导致终端卡死，必须避免使用！
+
+| 命令 | 原因 | 替代方案 |
+|------|------|----------|
+| `stty -F /dev/ttyACM0` | **卡死终端** - WSL 环境下会永久阻塞 | 直接用 `cat /dev/ttyACM0` |
+| `stty` + 任何串口操作 | 同上 | `timeout X cat /dev/ttyACM0` |
+| `miniterm` | WSL 不可用 | `timeout 30 cat /dev/ttyACM0 \| head -200` |
+| `screen /dev/ttyACM0` | 可能卡死 | 同上 |
+
+**正确的串口读取方式**:
+```bash
+# 读取串口日志 (推荐)
+timeout 30 cat /dev/ttyACM0 2>&1 | head -200
+
+# 过滤关键日志
+timeout 30 cat /dev/ttyACM0 2>&1 | strings | grep -iE "error|state|connect"
+```
 
 ---
 

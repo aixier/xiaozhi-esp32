@@ -308,7 +308,12 @@ void Application::ToggleChatState() {
         // 停止监听但保持连接，等待服务器的 LLM/TTS 响应
         Schedule([this]() {
             protocol_->SendStopListening();
+#if CONFIG_ALWAYS_ONLINE
+            // Always Online 模式：保持监听状态
+            ESP_LOGI(TAG, "Always Online: toggle - stay in listening mode");
+#else
             SetDeviceState(kDeviceStateIdle);
+#endif
         });
     }
 }
@@ -367,7 +372,13 @@ void Application::StopListening() {
     Schedule([this]() {
         if (device_state_ == kDeviceStateListening) {
             protocol_->SendStopListening();
+#if CONFIG_ALWAYS_ONLINE
+            // Always Online 模式：保持监听状态，等待服务器响应后继续监听
+            // 不切换到 Idle，保持在 Listening 状态
+            ESP_LOGI(TAG, "Always Online: stop listening but stay in listening mode");
+#else
             SetDeviceState(kDeviceStateIdle);
+#endif
         }
     });
 }
@@ -479,7 +490,22 @@ void Application::Start() {
         Schedule([this]() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
+#if CONFIG_ALWAYS_ONLINE
+            // Always Online 模式：断开后自动重连
+            ESP_LOGI(TAG, "Always Online: connection closed, reconnecting...");
+            SetDeviceState(kDeviceStateConnecting);
+            // 延迟重连，避免频繁重试
+            vTaskDelay(pdMS_TO_TICKS(1000));
+            if (protocol_->OpenAudioChannel()) {
+                SetDeviceState(kDeviceStateListening);
+                ESP_LOGI(TAG, "Always Online: reconnected successfully");
+            } else {
+                ESP_LOGW(TAG, "Always Online: reconnection failed");
+                SetDeviceState(kDeviceStateIdle);
+            }
+#else
             SetDeviceState(kDeviceStateIdle);
+#endif
         });
     });
     protocol_->OnIncomingJson([this, display](const cJSON* root) {
@@ -505,11 +531,16 @@ void Application::Start() {
                         // MAIN_EVENT_PLAYBACK_IDLE 事件会在播放队列为空时触发状态切换
                         if (audio_service_.IsIdle()) {
                             // 如果播放队列已空，立即切换状态
+#if CONFIG_ALWAYS_ONLINE
+                            // Always Online 模式：始终保持监听状态
+                            SetDeviceState(kDeviceStateListening);
+#else
                             if (listening_mode_ == kListeningModeManualStop) {
                                 SetDeviceState(kDeviceStateIdle);
                             } else {
                                 SetDeviceState(kDeviceStateListening);
                             }
+#endif
                         } else {
                             // 播放队列非空，等待播放完成
                             ESP_LOGI(TAG, "TTS stop received, waiting for playback to complete");
@@ -609,6 +640,24 @@ void Application::Start() {
         display->SetChatMessage("system", "");
         // Play the success sound to indicate the device is ready
         audio_service_.PlaySound(Lang::Sounds::P3_SUCCESS);
+
+#if CONFIG_ALWAYS_ONLINE
+        // 启动后自动连接服务器，保持在线状态
+        ESP_LOGI(TAG, "Always Online mode enabled, auto-connecting to server...");
+        Schedule([this]() {
+            if (!protocol_->IsAudioChannelOpened()) {
+                SetDeviceState(kDeviceStateConnecting);
+                if (protocol_->OpenAudioChannel()) {
+                    // 连接成功后进入监听状态（但不发送音频，只保持心跳）
+                    SetDeviceState(kDeviceStateListening);
+                    ESP_LOGI(TAG, "Always Online: connected and listening");
+                } else {
+                    ESP_LOGW(TAG, "Always Online: initial connection failed, will retry on next event");
+                    SetDeviceState(kDeviceStateIdle);
+                }
+            }
+        });
+#endif
     }
     // Print heap stats
     SystemInfo::PrintHeapStats();
@@ -710,11 +759,16 @@ void Application::MainEventLoop() {
             if (waiting_for_playback_complete_ && device_state_ == kDeviceStateSpeaking) {
                 waiting_for_playback_complete_ = false;
                 ESP_LOGI(TAG, "Playback complete, switching to listening mode");
+#if CONFIG_ALWAYS_ONLINE
+                // Always Online 模式：始终保持监听状态
+                SetDeviceState(kDeviceStateListening);
+#else
                 if (listening_mode_ == kListeningModeManualStop) {
                     SetDeviceState(kDeviceStateIdle);
                 } else {
                     SetDeviceState(kDeviceStateListening);
                 }
+#endif
             }
         }
     }

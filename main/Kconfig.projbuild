@@ -7,6 +7,14 @@ config OTA_URL
         The application will access this URL to check for new firmwares and server address.
         小智眼睛项目服务器地址: http://47.109.187.90:6100/xiaozhi/ota/
 
+config ALWAYS_ONLINE
+    bool "Always Online Mode"
+    default y
+    help
+        When enabled, the device will automatically connect to the server on startup
+        and stay connected. This keeps the device status as "online" in the admin panel.
+        启用后设备启动时自动连接服务器并保持在线状态，不进入待机模式。
+
 
 choice
     prompt "Default Language"
