@@ -1,3 +1,11 @@
+/**
+ * @file ota.h
+ * @brief PSM-ESP32-DEV-001: DEV-C010 Ota OTA升级管理类
+ * @trace PIM-DEV-001 设备域需求规格
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef _OTA_H
 #define _OTA_H
 

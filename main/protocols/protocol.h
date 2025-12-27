@@ -1,3 +1,11 @@
+/**
+ * @file protocol.h
+ * @brief PSM-ESP32-CNV-001: CNV-I001 Protocol 协议基类
+ * @trace PIM-CNV-001 对话域需求规格
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef PROTOCOL_H
 #define PROTOCOL_H
 

@@ -1,3 +1,11 @@
+/**
+ * @file application.h
+ * @brief PSM-ESP32-DEV-001: DEV-C001 Application 应用主控类
+ * @trace PIM-DEV-001 设备域需求规格
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef _APPLICATION_H_
 #define _APPLICATION_H_
 
@@ -72,6 +80,10 @@ private:
     std::unique_ptr<Protocol> protocol_;
     EventGroupHandle_t event_group_ = nullptr;
     esp_timer_handle_t clock_timer_handle_ = nullptr;
+    esp_timer_handle_t reconnect_timer_ = nullptr;  // Always Online 重连定时器
+    int reconnect_retry_count_ = 0;                 // 重连重试计数
+    static const int RECONNECT_INTERVAL_MS = 5000;  // 重连间隔 5 秒
+    static const int RECONNECT_MAX_RETRIES = 0;     // 0 = 无限重试
     volatile DeviceState device_state_ = kDeviceStateUnknown;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;
@@ -90,6 +102,12 @@ private:
     void ShowActivationCode(const std::string& code, const std::string& message);
     void OnClockTimer();
     void SetListeningMode(ListeningMode mode);
+
+#if CONFIG_ALWAYS_ONLINE
+    void StartReconnectTimer();
+    void StopReconnectTimer();
+    void OnReconnectTimer();
+#endif
 };
 
 #endif // _APPLICATION_H_

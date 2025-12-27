@@ -380,7 +380,147 @@ Device                  Server                    LLM/TTS
   │                       │                          │
 ```
 
-## 10. 潜在问题
+## 10. 语音交互完整数据流
+
+### 10.1 时序概览
+
+```
+┌─────────┐     ┌─────────┐     ┌─────────┐     ┌─────────┐
+│ 麦克风   │     │ ESP32   │     │ 服务器   │     │ 扬声器   │
+└────┬────┘     └────┬────┘     └────┬────┘     └────┬────┘
+     │               │               │               │
+     │──[PCM音频]───>│               │               │
+     │               │──[Opus编码]──>│               │
+     │               │  type=0x00    │  [ASR处理]    │
+     │               │               │               │
+     │               │<──[ASR结果]───│               │
+     │               │  type=0x20    │               │
+     │               │               │  [LLM处理]    │
+     │               │<──[LLM响应]───│               │
+     │               │  type=0x21    │               │
+     │               │               │  [TTS生成]    │
+     │               │<─[TTS_START]──│               │
+     │               │  type=0x10    │               │
+     │               │               │               │
+     │               │<─[Opus音频]───│               │
+     │               │  type=0x11 ×N │               │
+     │               │               │               │
+     │               │<──[TTS_END]───│               │
+     │               │  type=0x12    │               │
+     │               │               │               │
+     │               │───────────────────[PCM播放]──>│
+```
+
+### 10.2 发送路径 (MIC → Server)
+
+| 步骤 | 文件 | 行号 | 函数 | 说明 |
+|-----|------|------|------|------|
+| 1 | `audio_service.cc` | 153 | `ReadAudioData()` | 从codec读取PCM |
+| 2 | `audio_service.cc` | 207 | `AudioInputTask()` | 信号处理+VAD |
+| 3 | `audio_service.cc` | 494 | `PushTaskToEncodeQueue()` | 推入编码队列 |
+| 4 | `audio_service.cc` | 449 | `OpusCodecTask()` | Opus编码 |
+| 5 | `application.cc` | 715 | `MAIN_EVENT_SEND_AUDIO` | 取出发送 |
+| 6 | `websocket_protocol.cc` | 45 | `SendAudio()` | BP3封装发送 |
+
+```cpp
+// websocket_protocol.cc:45-58
+BinaryProtocol3* bp3 = (BinaryProtocol3*)serialized.data();
+bp3->type = 0;                              // AUDIO_DATA
+bp3->reserved = 0;
+bp3->payload_size = htons(packet->payload.size());
+memcpy(bp3->payload, packet->payload.data(), packet->payload.size());
+websocket_->Send(serialized, size, true);  // 二进制帧
+```
+
+### 10.3 ASR/LLM 接收路径 (Server → Text)
+
+| 消息类型 | type值 | 处理位置 | 回调 |
+|---------|--------|---------|------|
+| ASR识别结果 | 0x20 | `websocket_protocol.cc:212` | `application.cc:564` |
+| LLM响应 | 0x21 | `websocket_protocol.cc:212` | `application.cc:572` |
+
+```cpp
+// websocket_protocol.cc:212-241
+if (msg_type == 0x20 || msg_type == 0x21) {
+    std::string json_str((char*)payload, payload_size);
+    cJSON* json_payload = cJSON_Parse(json_str.c_str());
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "type", msg_type == 0x20 ? "stt" : "llm");
+    // ... 复制 text, emotion 等字段
+    on_incoming_json_(root);
+}
+
+// application.cc:564-586
+if (type == "stt") {
+    EventBridge::EmitSetText(text);  // 显示ASR结果
+}
+if (type == "llm") {
+    EventBridge::EmitSetText(text);      // 显示LLM响应
+    EventBridge::EmitSetEmotion(emotion); // 更新表情
+}
+```
+
+### 10.4 TTS 播放路径 (Server → Speaker)
+
+| 步骤 | type值 | 文件位置 | 说明 |
+|-----|--------|---------|------|
+| 1 | 0x10 | `websocket_protocol.cc:205` | AUDIO_START → 启动预缓冲 |
+| 2 | 0x11 | `websocket_protocol.cc:151` | AUDIO_DATA → 推入解码队列 |
+| 3 | - | `audio_service.cc:416` | Opus解码 → PCM |
+| 4 | - | `audio_service.cc:341` | PCM → 扬声器播放 |
+| 5 | 0x12 | `websocket_protocol.cc:174` | AUDIO_END → 停止预缓冲 |
+
+```cpp
+// TTS开始: websocket_protocol.cc:205-211
+case 0x10:  // AUDIO_START
+    json["type"] = "tts";
+    json["state"] = "start";
+    on_incoming_json_(root);  // → audio_service_.StartPrebuffering()
+
+// TTS数据: websocket_protocol.cc:151-173
+case 0x11:  // AUDIO_DATA
+    packet->payload.assign(payload, payload + payload_size);
+    on_incoming_audio_(std::move(packet));  // → PushPacketToDecodeQueue()
+
+// TTS结束: websocket_protocol.cc:174-198
+case 0x12:  // AUDIO_END
+    json["type"] = "tts";
+    json["state"] = "stop";
+    on_incoming_json_(root);  // → audio_service_.StopPrebuffering()
+```
+
+### 10.5 关键队列配置
+
+```cpp
+// audio_service.h
+#define OPUS_FRAME_DURATION_MS 60           // Opus帧长
+#define MAX_ENCODE_TASKS_IN_QUEUE 2         // 编码队列: 120ms
+#define MAX_SEND_PACKETS_IN_QUEUE 40        // 发送队列: 2.4s
+#define MAX_DECODE_PACKETS_IN_QUEUE 200     // 解码队列: 12s (4G优化)
+#define MAX_PLAYBACK_TASKS_IN_QUEUE 10      // 播放队列: 600ms
+#define BUFFER_START_THRESHOLD_FRAMES 10    // 预缓冲启动: 600ms
+#define BUFFER_RESUME_THRESHOLD_FRAMES 5    // 预缓冲恢复: 300ms
+```
+
+### 10.6 状态机转换
+
+```
+Idle ─────────> Connecting ─────────> Listening
+  ▲                                      │
+  │                                      ▼
+  │                                   Speaking
+  │                                      │
+  └──────────────────────────────────────┘
+```
+
+| 事件 | 状态转换 | 代码位置 |
+|------|---------|---------|
+| 连接成功 | Connecting → Listening | `application.cc:425` |
+| TTS开始 | Listening → Speaking | `application.cc:519` |
+| TTS结束+播放完成 | Speaking → Listening | `application.cc:760` |
+| 断开连接 | * → Idle | `application.cc:482` |
+
+## 11. 潜在问题
 
 ### 10.1 Listen 消息丢失
 

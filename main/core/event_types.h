@@ -1,3 +1,11 @@
+/**
+ * @file event_types.h
+ * @brief PSM-ESP32-CNV-001: CNV-T EventType 事件类型定义
+ * @trace PIM-CNV-001 对话域需求规格
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef EVENT_TYPES_H
 #define EVENT_TYPES_H
 

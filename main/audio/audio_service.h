@@ -1,3 +1,11 @@
+/**
+ * @file audio_service.h
+ * @brief PSM-ESP32-MED-001: MED-C001 AudioService 音频服务核心
+ * @trace PIM-MED-001 媒体域需求规格
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef AUDIO_SERVICE_H
 #define AUDIO_SERVICE_H
 
@@ -43,8 +51,9 @@
 #define MAX_TIMESTAMPS_IN_QUEUE 3
 
 // Buffering Configuration - 4G网络需要更大预缓冲
-#define BUFFER_START_THRESHOLD_FRAMES 10   // 600ms 预缓冲启动
-#define BUFFER_RESUME_THRESHOLD_FRAMES 5   // 300ms 恢复缓冲
+// URC 回调耗时 50-200ms，需要足够缓冲来平滑
+#define BUFFER_START_THRESHOLD_FRAMES 30   // 1800ms 预缓冲启动
+#define BUFFER_RESUME_THRESHOLD_FRAMES 15  // 900ms 恢复缓冲
 
 #define AUDIO_POWER_TIMEOUT_MS 15000
 #define AUDIO_POWER_CHECK_INTERVAL_MS 1000

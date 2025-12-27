@@ -1,3 +1,11 @@
+/**
+ * @file event_bridge.h
+ * @brief PSM-ESP32-CNV-001: CNV-C011 EventBridge 事件桥接器
+ * @trace PIM-CNV-001 对话域需求规格
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef EVENT_BRIDGE_H
 #define EVENT_BRIDGE_H
 

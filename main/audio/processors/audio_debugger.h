@@ -1,3 +1,11 @@
+/**
+ * @file audio_debugger.h
+ * @brief PSM-ESP32-MED-001: MED-D001 音频调试器
+ * @trace PIM-MED-001 媒体域需求规格 - 调试支持组件
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef AUDIO_DEBUGGER_H
 #define AUDIO_DEBUGGER_H
 

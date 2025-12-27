@@ -1,3 +1,11 @@
+/**
+ * @file no_audio_processor.h
+ * @brief PSM-ESP32-MED-001: MED-P002 空操作音频处理器实现
+ * @trace PIM-MED-001 媒体域需求规格 - AudioProcessor 接口实现 (无处理透传)
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef DUMMY_AUDIO_PROCESSOR_H
 #define DUMMY_AUDIO_PROCESSOR_H
 

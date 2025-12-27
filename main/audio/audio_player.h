@@ -1,3 +1,11 @@
+/**
+ * @file audio_player.h
+ * @brief PSM-ESP32-MED-001: MED-C003 AudioPlayer 播放器
+ * @trace PIM-MED-001 媒体域需求规格
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef AUDIO_PLAYER_H
 #define AUDIO_PLAYER_H
 

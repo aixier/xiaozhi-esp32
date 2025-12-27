@@ -13,6 +13,7 @@
 
 #include <cstring>
 #include <esp_log.h>
+#include <esp_timer.h>
 #include <cJSON.h>
 #include <driver/gpio.h>
 #include <arpa/inet.h>
@@ -86,6 +87,21 @@ Application::Application() {
         .skip_unhandled_events = true
     };
     esp_timer_create(&clock_timer_args, &clock_timer_handle_);
+
+#if CONFIG_ALWAYS_ONLINE
+    // 创建重连定时器 (持久的，不会内存泄漏)
+    esp_timer_create_args_t reconnect_timer_args = {
+        .callback = [](void* arg) {
+            Application* app = (Application*)arg;
+            app->OnReconnectTimer();
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "reconnect_timer",
+        .skip_unhandled_events = true
+    };
+    esp_timer_create(&reconnect_timer_args, &reconnect_timer_);
+#endif
 }
 
 Application::~Application() {
@@ -93,6 +109,12 @@ Application::~Application() {
         esp_timer_stop(clock_timer_handle_);
         esp_timer_delete(clock_timer_handle_);
     }
+#if CONFIG_ALWAYS_ONLINE
+    if (reconnect_timer_ != nullptr) {
+        esp_timer_stop(reconnect_timer_);
+        esp_timer_delete(reconnect_timer_);
+    }
+#endif
     vEventGroupDelete(event_group_);
 }
 
@@ -472,12 +494,17 @@ void Application::Start() {
             if (device_state_ != kDeviceStateSpeaking) {
                 SetDeviceState(kDeviceStateSpeaking);
             }
-            // 4G 最佳实践：使用阻塞模式，等待解码完成，避免丢包
-            audio_service_.PushPacketToDecodeQueue(std::move(packet), true);
+            // 4G 最佳实践：使用非阻塞模式，队列满时丢包，避免 URC 线程阻塞导致队列溢出
+            // 队列已有 200 包（12秒缓冲），偶尔丢包不影响播放
+            audio_service_.PushPacketToDecodeQueue(std::move(packet), false);
         }
     });
     protocol_->OnAudioChannelOpened([this, codec, &board]() {
         board.SetPowerSaveMode(false);
+#if CONFIG_ALWAYS_ONLINE
+        // 连接成功，停止重连定时器
+        StopReconnectTimer();
+#endif
         if (protocol_->server_sample_rate() != codec->output_sample_rate()) {
             ESP_LOGW(TAG, "Server sample rate %d does not match device output sample rate %d, resampling may cause distortion",
                 protocol_->server_sample_rate(), codec->output_sample_rate());
@@ -489,18 +516,10 @@ void Application::Start() {
             auto display = Board::GetInstance().GetDisplay();
             display->SetChatMessage("system", "");
 #if CONFIG_ALWAYS_ONLINE
-            // Always Online 模式：断开后自动重连
-            ESP_LOGI(TAG, "Always Online: connection closed, reconnecting...");
-            SetDeviceState(kDeviceStateConnecting);
-            // 延迟重连，避免频繁重试
-            vTaskDelay(pdMS_TO_TICKS(1000));
-            if (protocol_->OpenAudioChannel()) {
-                SetDeviceState(kDeviceStateListening);
-                ESP_LOGI(TAG, "Always Online: reconnected successfully");
-            } else {
-                ESP_LOGW(TAG, "Always Online: reconnection failed");
-                SetDeviceState(kDeviceStateIdle);
-            }
+            // Always Online 模式：断开后启动重连定时器
+            ESP_LOGI(TAG, "Always Online: connection closed, starting reconnect timer");
+            SetDeviceState(kDeviceStateIdle);
+            StartReconnectTimer();
 #else
             SetDeviceState(kDeviceStateIdle);
 #endif
@@ -650,8 +669,10 @@ void Application::Start() {
                     SetDeviceState(kDeviceStateListening);
                     ESP_LOGI(TAG, "Always Online: connected and listening");
                 } else {
-                    ESP_LOGW(TAG, "Always Online: initial connection failed, will retry on next event");
+                    // 连接失败，启动重连定时器持续重试
+                    ESP_LOGW(TAG, "Always Online: initial connection failed, starting reconnect timer");
                     SetDeviceState(kDeviceStateIdle);
+                    StartReconnectTimer();
                 }
             }
         });
@@ -964,3 +985,51 @@ void Application::SetAecMode(AecMode mode) {
 void Application::PlaySound(const std::string_view& sound) {
     audio_service_.PlaySound(sound);
 }
+
+#if CONFIG_ALWAYS_ONLINE
+void Application::StartReconnectTimer() {
+    if (reconnect_timer_ == nullptr) {
+        return;
+    }
+    // 停止之前的定时器（如果正在运行）
+    esp_timer_stop(reconnect_timer_);
+    // 启动周期性重连定时器
+    esp_timer_start_periodic(reconnect_timer_, RECONNECT_INTERVAL_MS * 1000);
+    ESP_LOGI(TAG, "Always Online: reconnect timer started (interval: %dms)", RECONNECT_INTERVAL_MS);
+}
+
+void Application::StopReconnectTimer() {
+    if (reconnect_timer_ == nullptr) {
+        return;
+    }
+    esp_timer_stop(reconnect_timer_);
+    reconnect_retry_count_ = 0;
+    ESP_LOGI(TAG, "Always Online: reconnect timer stopped");
+}
+
+void Application::OnReconnectTimer() {
+    // 在定时器回调中调度到主循环执行，避免线程问题
+    Schedule([this]() {
+        // 如果已经连接，停止重连定时器
+        if (protocol_ && protocol_->IsAudioChannelOpened()) {
+            StopReconnectTimer();
+            return;
+        }
+
+        reconnect_retry_count_++;
+        ESP_LOGI(TAG, "Always Online: reconnect attempt #%d", reconnect_retry_count_);
+
+        SetDeviceState(kDeviceStateConnecting);
+        if (protocol_->OpenAudioChannel()) {
+            SetDeviceState(kDeviceStateListening);
+            StopReconnectTimer();
+            ESP_LOGI(TAG, "Always Online: reconnected successfully after %d attempts", reconnect_retry_count_);
+        } else {
+            SetDeviceState(kDeviceStateIdle);
+            ESP_LOGW(TAG, "Always Online: reconnect attempt #%d failed, will retry in %dms",
+                     reconnect_retry_count_, RECONNECT_INTERVAL_MS);
+            // 定时器会继续触发下一次重试
+        }
+    });
+}
+#endif

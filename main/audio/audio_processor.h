@@ -1,3 +1,11 @@
+/**
+ * @file audio_processor.h
+ * @brief PSM-ESP32-MED-001: MED-I001 AudioProcessor 音频处理器接口
+ * @trace PIM-MED-001 媒体域需求规格
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef AUDIO_PROCESSOR_H
 #define AUDIO_PROCESSOR_H
 

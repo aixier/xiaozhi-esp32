@@ -1,3 +1,11 @@
+/**
+ * @file wake_word.h
+ * @brief PSM-ESP32-MED-001: MED-I002 WakeWord 唤醒词检测接口
+ * @trace PIM-MED-001 媒体域需求规格
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef WAKE_WORD_H
 #define WAKE_WORD_H
 

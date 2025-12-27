@@ -1,3 +1,11 @@
+/**
+ * @file audio_codec.h
+ * @brief PSM-ESP32-MED-001: MED-C002 AudioCodec 音频编解码器抽象
+ * @trace PIM-MED-001 媒体域需求规格
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef _AUDIO_CODEC_H
 #define _AUDIO_CODEC_H
 

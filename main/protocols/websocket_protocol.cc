@@ -14,10 +14,53 @@
 
 WebsocketProtocol::WebsocketProtocol() {
     event_group_handle_ = xEventGroupCreate();
+
+    // 创建心跳定时器
+    esp_timer_create_args_t timer_args = {
+        .callback = [](void* arg) {
+            static_cast<WebsocketProtocol*>(arg)->OnHeartbeatTimer();
+        },
+        .arg = this,
+        .dispatch_method = ESP_TIMER_TASK,
+        .name = "ws_heartbeat",
+        .skip_unhandled_events = true,
+    };
+    esp_timer_create(&timer_args, &heartbeat_timer_);
 }
 
 WebsocketProtocol::~WebsocketProtocol() {
+    StopHeartbeat();
+    if (heartbeat_timer_) {
+        esp_timer_delete(heartbeat_timer_);
+        heartbeat_timer_ = nullptr;
+    }
     vEventGroupDelete(event_group_handle_);
+}
+
+void WebsocketProtocol::StartHeartbeat() {
+    if (heartbeat_timer_) {
+        esp_timer_start_periodic(heartbeat_timer_, HEARTBEAT_INTERVAL_MS * 1000);
+        ESP_LOGI(TAG, "WebSocket heartbeat started (interval: %dms)", HEARTBEAT_INTERVAL_MS);
+    }
+}
+
+void WebsocketProtocol::StopHeartbeat() {
+    if (heartbeat_timer_) {
+        esp_timer_stop(heartbeat_timer_);
+        ESP_LOGD(TAG, "WebSocket heartbeat stopped");
+    }
+}
+
+void WebsocketProtocol::OnHeartbeatTimer() {
+    // 音频流传输中时暂停心跳，避免 AT+MIPSEND 阻塞 URC 接收导致丢包
+    if (audio_streaming_) {
+        ESP_LOGD(TAG, "Skipping heartbeat during audio streaming");
+        return;
+    }
+    if (websocket_ && websocket_->IsConnected()) {
+        websocket_->Ping();
+        ESP_LOGD(TAG, "Sent WebSocket ping");
+    }
 }
 
 bool WebsocketProtocol::Start() {
@@ -76,6 +119,8 @@ bool WebsocketProtocol::IsAudioChannelOpened() const {
 }
 
 void WebsocketProtocol::CloseAudioChannel() {
+    StopHeartbeat();
+    audio_streaming_ = false;  // 重置标志，确保下次连接心跳正常
     websocket_.reset();
 }
 
@@ -89,6 +134,7 @@ bool WebsocketProtocol::OpenAudioChannel() {
     }
 
     error_occurred_ = false;
+    audio_streaming_ = false;  // 重置音频流标志
     // 重要：初始化 last_incoming_time_ 防止超时误判
     last_incoming_time_ = std::chrono::steady_clock::now();
     ESP_LOGI(TAG, "OpenAudioChannel: url=%s, version=%d", url.c_str(), version_);
@@ -172,8 +218,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         }));
                     }
                 } else if (msg_type == 0x12) {
-                    // AUDIO_END: 音频结束 - 打印完整统计
-                    ESP_LOGI(TAG, "=== AUDIO RX STATS ===");
+                    // AUDIO_END: 音频结束 - 恢复心跳，打印完整统计
+                    audio_streaming_ = false;  // 恢复心跳
+                    ESP_LOGI(TAG, "=== AUDIO RX STATS (heartbeat resumed) ===");
                     ESP_LOGI(TAG, "Total frames: %lu", (unsigned long)rx_frame_count_);
                     ESP_LOGI(TAG, "Total bytes: %lu", (unsigned long)rx_total_bytes_);
 
@@ -197,11 +244,12 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         cJSON_Delete(root);
                     }
                 } else if (msg_type == 0x10) {
-                    // AUDIO_START: 音频开始 - 重置帧统计
+                    // AUDIO_START: 音频开始 - 重置帧统计，暂停心跳
                     rx_frame_count_ = 0;
                     rx_total_bytes_ = 0;
                     rx_frame_sizes_.clear();
-                    ESP_LOGI(TAG, "Received AUDIO_START - reset frame stats");
+                    audio_streaming_ = true;  // 暂停心跳，避免 ping 阻塞音频接收
+                    ESP_LOGI(TAG, "Received AUDIO_START - reset frame stats, heartbeat paused");
                     if (on_incoming_json_ != nullptr) {
                         cJSON* root = cJSON_CreateObject();
                         cJSON_AddStringToObject(root, "type", "tts");
@@ -292,6 +340,8 @@ bool WebsocketProtocol::OpenAudioChannel() {
 
     websocket_->OnDisconnected([this]() {
         ESP_LOGW(TAG, "Websocket disconnected callback triggered");
+        StopHeartbeat();  // 停止心跳
+        audio_streaming_ = false;  // 重置音频流标志
         if (on_audio_channel_closed_ != nullptr) {
             ESP_LOGI(TAG, "Calling on_audio_channel_closed_ callback");
             on_audio_channel_closed_();
@@ -323,6 +373,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
         return false;
     }
     ESP_LOGI(TAG, "Server hello received, session_id=%s", session_id_.c_str());
+
+    // 启动心跳保活 (4G 运营商 NAT 超时约 10-30 秒)
+    StartHeartbeat();
 
     if (on_audio_channel_opened_ != nullptr) {
         ESP_LOGI(TAG, "Calling on_audio_channel_opened_ callback");

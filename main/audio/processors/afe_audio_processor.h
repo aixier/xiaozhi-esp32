@@ -1,3 +1,11 @@
+/**
+ * @file afe_audio_processor.h
+ * @brief PSM-ESP32-MED-001: MED-P001 AFE 音频处理器实现
+ * @trace PIM-MED-001 媒体域需求规格 - AudioProcessor 接口实现
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef AFE_AUDIO_PROCESSOR_H
 #define AFE_AUDIO_PROCESSOR_H
 

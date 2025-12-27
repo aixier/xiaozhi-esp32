@@ -1,3 +1,11 @@
+/**
+ * @file event_bus.h
+ * @brief PSM-ESP32-CNV-001: CNV-C010 EventBus 事件总线
+ * @trace PIM-CNV-001 对话域需求规格
+ * @version 1.0.0
+ * @date 2025-12-27
+ */
+
 #ifndef EVENT_BUS_H
 #define EVENT_BUS_H
 
