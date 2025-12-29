@@ -317,7 +317,7 @@ private:
     }
 
 public:
-    zhengchen_eye() : DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN),
+    zhengchen_eye() : DualNetworkBoard(ML307_TX_PIN, ML307_RX_PIN, GPIO_NUM_NC, 0),  // 0 = WiFi default
         boot_button_(BOOT_BUTTON_GPIO){
         ESP_LOGI(TAG, "========================================");
         ESP_LOGI(TAG, "zhengchen_eye board initialization START");

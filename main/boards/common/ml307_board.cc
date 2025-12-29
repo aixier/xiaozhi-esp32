@@ -192,3 +192,35 @@ std::string Ml307Board::GetDeviceStatusJson() {
     cJSON_Delete(root);
     return json;
 }
+
+bool Ml307Board::ResetNetwork() {
+    if (modem_ == nullptr) {
+        ESP_LOGE(TAG, "ResetNetwork: modem is null");
+        return false;
+    }
+
+    ESP_LOGW(TAG, "ResetNetwork: Resetting 4G module via flight mode toggle...");
+
+    // 进入飞行模式
+    ESP_LOGI(TAG, "ResetNetwork: Entering flight mode (AT+CFUN=0)");
+    modem_->SetFlightMode(true);
+
+    // 等待 2 秒让模块完全断开
+    vTaskDelay(pdMS_TO_TICKS(2000));
+
+    // 退出飞行模式
+    ESP_LOGI(TAG, "ResetNetwork: Exiting flight mode (AT+CFUN=1)");
+    modem_->SetFlightMode(false);
+
+    // 等待网络重新就绪
+    ESP_LOGI(TAG, "ResetNetwork: Waiting for network ready...");
+    auto result = modem_->WaitForNetworkReady(30000);
+
+    if (result == NetworkStatus::Ready) {
+        ESP_LOGI(TAG, "ResetNetwork: Network recovered successfully, CSQ=%d", modem_->GetCsq());
+        return true;
+    } else {
+        ESP_LOGE(TAG, "ResetNetwork: Network recovery failed, status=%d", static_cast<int>(result));
+        return false;
+    }
+}

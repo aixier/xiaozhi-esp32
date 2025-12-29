@@ -52,6 +52,10 @@ public:
     virtual void SetPowerSaveMode(bool enabled) = 0;
     virtual std::string GetBoardJson() = 0;
     virtual std::string GetDeviceStatusJson() = 0;
+
+    // 网络恢复 (用于 4G 模块 PDP 上下文丢失等情况)
+    // 默认实现为空，由子类 (如 Ml307Board) 重写
+    virtual bool ResetNetwork() { return false; }
 };
 
 #define DECLARE_BOARD(BOARD_CLASS_NAME) \

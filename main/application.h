@@ -84,6 +84,7 @@ private:
     int reconnect_retry_count_ = 0;                 // 重连重试计数
     static const int RECONNECT_INTERVAL_MS = 5000;  // 重连间隔 5 秒
     static const int RECONNECT_MAX_RETRIES = 0;     // 0 = 无限重试
+    static const int NETWORK_RESET_THRESHOLD = 10;  // 连续失败 N 次后重置网络
     volatile DeviceState device_state_ = kDeviceStateUnknown;
     ListeningMode listening_mode_ = kListeningModeAutoStop;
     AecMode aec_mode_ = kAecOff;

@@ -2,10 +2,11 @@ menu "Xiaozhi Assistant"
 
 config OTA_URL
     string "Default OTA URL"
-    default "http://47.109.187.90:6100/xiaozhi/ota/"
+    default "https://api.tenclass.net/xiaozhi/ota/"
     help
         The application will access this URL to check for new firmwares and server address.
-        小智眼睛项目服务器地址: http://47.109.187.90:6100/xiaozhi/ota/
+        官方服务器: https://api.tenclass.net/xiaozhi/ota/
+        小智眼睛项目服务器: http://47.109.187.90:6100/xiaozhi/ota/
 
 config ALWAYS_ONLINE
     bool "Always Online Mode"
@@ -15,6 +16,20 @@ config ALWAYS_ONLINE
         and stay connected. This keeps the device status as "online" in the admin panel.
         启用后设备启动时自动连接服务器并保持在线状态，不进入待机模式。
 
+config DEFAULT_WIFI_SSID
+    string "Default WiFi SSID"
+    default "MERCURY_2204"
+    help
+        Default WiFi SSID to connect to when no WiFi is configured.
+        Leave empty to use WiFi configuration mode instead.
+        默认 WiFi 名称，设备首次启动时自动连接。
+
+config DEFAULT_WIFI_PASSWORD
+    string "Default WiFi Password"
+    default "18782448668"
+    help
+        Default WiFi password for the above SSID.
+        默认 WiFi 密码。
 
 choice
     prompt "Default Language"

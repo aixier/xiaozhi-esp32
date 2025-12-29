@@ -78,13 +78,19 @@ void WifiBoard::StartNetwork() {
         return;
     }
 
-    // If no WiFi SSID is configured, enter WiFi configuration mode
+    // If no WiFi SSID is configured, add default WiFi or enter configuration mode
     auto& ssid_manager = SsidManager::GetInstance();
     auto ssid_list = ssid_manager.GetSsidList();
     if (ssid_list.empty()) {
+#ifdef CONFIG_DEFAULT_WIFI_SSID
+        // Add default WiFi credentials if configured
+        ESP_LOGI(TAG, "No WiFi configured, adding default: %s", CONFIG_DEFAULT_WIFI_SSID);
+        ssid_manager.AddSsid(CONFIG_DEFAULT_WIFI_SSID, CONFIG_DEFAULT_WIFI_PASSWORD);
+#else
         wifi_config_mode_ = true;
         EnterWifiConfigMode();
         return;
+#endif
     }
 
     auto& wifi_station = WifiStation::GetInstance();

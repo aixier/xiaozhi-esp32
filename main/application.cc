@@ -1019,6 +1019,26 @@ void Application::OnReconnectTimer() {
         reconnect_retry_count_++;
         ESP_LOGI(TAG, "Always Online: reconnect attempt #%d", reconnect_retry_count_);
 
+        // 检查是否需要重置网络 (每 NETWORK_RESET_THRESHOLD 次失败后重置一次)
+        if (reconnect_retry_count_ > 0 && reconnect_retry_count_ % NETWORK_RESET_THRESHOLD == 0) {
+            ESP_LOGW(TAG, "Always Online: %d consecutive failures, attempting network reset...",
+                     reconnect_retry_count_);
+
+            auto& board = Board::GetInstance();
+            auto display = board.GetDisplay();
+
+            // 显示提示
+            Alert(Lang::Strings::ERROR, "正在重置网络...", "thinking", Lang::Sounds::P3_EXCLAMATION);
+            display->SetStatus(Lang::Strings::REGISTERING_NETWORK);
+
+            if (board.ResetNetwork()) {
+                ESP_LOGI(TAG, "Always Online: network reset successful, retrying connection...");
+            } else {
+                ESP_LOGE(TAG, "Always Online: network reset failed, will continue retrying");
+                Alert(Lang::Strings::ERROR, "网络重置失败", "sad", Lang::Sounds::P3_ERR_REG);
+            }
+        }
+
         SetDeviceState(kDeviceStateConnecting);
         if (protocol_->OpenAudioChannel()) {
             SetDeviceState(kDeviceStateListening);

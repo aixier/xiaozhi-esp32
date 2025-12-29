@@ -24,6 +24,9 @@ public:
     virtual void SetPowerSaveMode(bool enabled) override;
     virtual AudioCodec* GetAudioCodec() override { return nullptr; }
     virtual std::string GetDeviceStatusJson() override;
+
+    // 网络恢复: 通过飞行模式切换重置 4G 模块
+    virtual bool ResetNetwork() override;
 };
 
 #endif // ML307_BOARD_H
