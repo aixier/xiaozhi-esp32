@@ -9,6 +9,7 @@
 #include <esp_log.h>
 #include <arpa/inet.h>
 #include "assets/lang_config.h"
+#include "emotion/emotion_downloader.h"
 
 #define TAG "WS"
 
@@ -288,9 +289,24 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         }
                     }
                 } else if (msg_type == 0x0F) {
-                    // ERROR
+                    // ERROR - 服务器发生错误 (如 ASR 超时)
                     std::string json_str((char*)payload, payload_size);
                     ESP_LOGE(TAG, "Received ERROR: %s", json_str.c_str());
+
+                    // 重要修复：收到错误后重新发送 listen:start
+                    // 否则服务器 is_listening=False，设备继续发音频会被忽略
+#if CONFIG_ALWAYS_ONLINE
+                    ESP_LOGI(TAG, "Always Online: error received, re-sending listen:start");
+                    Application::GetInstance().Schedule([this]() {
+                        // 重新发送 listen:start 让服务器恢复监听状态
+                        SendStartListening(kListeningModeAutoStop);
+                    });
+#endif
+                } else if (msg_type == 0x38) {
+                    // EMOTION_UPDATE (0x38): 表情更新推送
+                    std::string json_str((char*)payload, payload_size);
+                    ESP_LOGI(TAG, "Received EMOTION_UPDATE: %s", json_str.c_str());
+                    EmotionDownloader::GetInstance().HandleEmotionUpdate(json_str);
                 } else {
                     ESP_LOGW(TAG, "Unknown binary message type: 0x%02X", msg_type);
                 }
