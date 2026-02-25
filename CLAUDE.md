@@ -16,6 +16,7 @@
 | 🖥️ **显示问题** | [docs/DISPLAY_ISSUES.md](docs/DISPLAY_ISSUES.md) |
 | 🔌 **API 规范** | [docs/API_SPECIFICATION.md](docs/API_SPECIFICATION.md) |
 | 🚀 **私有服务器部署** | [docs/PRIVATE_SERVER_DEPLOYMENT.md](docs/PRIVATE_SERVER_DEPLOYMENT.md) |
+| 📋 **4G音频改进任务** | [docs/TODO_AUDIO_CONTROL_DATA_SPLIT.md](docs/TODO_AUDIO_CONTROL_DATA_SPLIT.md) |
 
 ---
 
@@ -196,6 +197,16 @@ W AudioService: Decode queue full  # 队列满丢包
 3. 预缓冲: 180ms → 600ms
 
 **详细文档**: [MODULE_AUDIO.md 第13节](docs/MODULE_AUDIO.md)
+
+### 4G 音频三大遗留问题方案 (待实施)
+
+**问题**: 丢包爆音 / 打断延迟 / NAT 超时断连
+
+**根因**: ML307 AT 串口单线程，数据面与控制面耦合
+
+**方案**: 控制面/数据面分离 — 数据帧走 AT+MIPSEND，Ping/Pong 走被动响应，序列号嵌入 reserved 字段
+
+**详细文档**: [MODULE_AUDIO.md 第14节](docs/MODULE_AUDIO.md)
 
 ### Always Online 常驻在线模式
 

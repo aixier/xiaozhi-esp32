@@ -676,7 +676,395 @@ W AudioService: Decode queue full after timeout  // 超时丢包 - 正常降级
 | `audio_service.cc` | `wait()` → `wait_for(100ms)` | 避免无限阻塞 |
 | `application.cc` | `PushPacketToDecodeQueue(packet, true)` | 启用等待模式 |
 
-## 14. 参考资料
+## 14. 控制面/数据面分离方案 — 解决 4G 音频三大遗留问题
+
+> **状态**: 设计方案（待实施）
+> **日期**: 2026-02-25
+> **改动量**: ~100 行代码，不新增线程，不增加内存
+
+### 14.1 问题总结
+
+第 13 节解决了 4G 音频播放的"能播"问题，但仍存在三个遗留缺陷：
+
+| # | 问题 | 现象 | 根因 |
+|---|------|------|------|
+| 1 | 无丢包恢复 | 丢包时爆音/咔嗒声 | Opus PLC 未启用，无序列号 |
+| 2 | 无法快速打断 | 用户说新唤醒词后 1-2 秒才停播 | 12 秒管线无法快速清空 |
+| 3 | 播放期间心跳暂停 | NAT 超时断连、AUDIO_END 丢失卡死 | Ping 与音频帧争用 AT 串口 |
+
+**三个问题的共同根因是同一个架构缺陷**：
+
+```
+                    ML307 AT 串口（单线程）
+                    /        |        \
+               发音频帧   发 Ping    收 URC
+                    \        |        /
+                     互相阻塞，只能串行
+
+→ 为了不丢音频，禁了 Ping  → NAT 超时（问题 3）
+→ 丢包时无感知              → 无法 PLC（问题 1）
+→ 管线太深 (12s)            → 无法快速打断（问题 2）
+```
+
+### 14.2 根本解法：控制面/数据面分离
+
+核心原则：**数据帧走 AT+MIPSEND（主动发送），Ping/Pong 走被动响应（服务端发起），序列号嵌入已有协议头的 reserved 字段。**
+
+```
+┌─── 数据面（设备主动）──────────────────────────────────┐
+│  AUDIO_DATA 帧收发：走 WebSocket binary 通道            │
+│  音频帧是单向的（TTS: 服务端→设备），不占设备发送通道      │
+└────────────────────────────────────────────────────────┘
+
+┌─── 控制面（服务端主动）────────────────────────────────┐
+│  Ping: 服务端发起，设备被动 Pong 回复                    │
+│  → 不争用 AT+MIPSEND                                   │
+│  → ML307 已有自动 Pong 机制 (web_socket.cc:391)         │
+│                                                        │
+│  序列号: 嵌入 BinaryProtocol3.reserved 字段             │
+│  → 零额外带宽，设备端检测丢包                            │
+│                                                        │
+│  超时保护: 设备端基于 RX 活跃度判断连接存活               │
+│  → 有数据 = 连接活着，不需要 Ping                        │
+│  → 无数据超时 = 合成 AUDIO_END，不会卡死                 │
+└────────────────────────────────────────────────────────┘
+```
+
+### 14.3 改动一：Opus PLC 丢包恢复（~40 行）
+
+#### 14.3.1 协议层：利用 reserved 字段传递序列号
+
+`BinaryProtocol3.reserved`（protocol.h:36）当前恒为 0，改为 8-bit 循环序列号：
+
+```cpp
+// protocol.h - 无需改结构体，重新解释 reserved 字段即可
+struct BinaryProtocol3 {
+    uint8_t type;
+    uint8_t sequence;       // ← 原 reserved，改语义为序列号 (0-255 循环)
+    uint16_t payload_size;
+    uint8_t payload[];
+} __attribute__((packed));
+// 8-bit 循环窗口：60ms × 256 = 15.36 秒，远超 4G 最大抖动
+```
+
+服务端发送 AUDIO_DATA 时递增 sequence（需配合 xiaozhi-server 修改）。
+
+#### 14.3.2 设备端：检测丢包 + 生成 PLC 帧
+
+```cpp
+// websocket_protocol.cc - OnData() 中 AUDIO_DATA (0x11) 处理
+if (msg_type == 0x11) {
+    uint8_t seq = bp3->sequence;
+
+    // 序列号间隙检测（仅当服务端已启用序列号时生效）
+    if (last_seq_valid_ && seq != 0) {
+        uint8_t expected = (last_seq_ + 1) & 0xFF;
+        int lost = (seq - expected) & 0xFF;
+        if (lost > 0 && lost < 10) {  // 合理范围，>10 认为是序列号重置
+            ESP_LOGW(TAG, "Packet loss detected: expected seq=%d, got=%d, lost=%d",
+                     expected, seq, lost);
+            // 为每个丢失帧插入 PLC 占位包（空 payload）
+            for (int i = 0; i < lost; i++) {
+                auto plc = std::make_unique<AudioStreamPacket>();
+                plc->sample_rate = server_sample_rate_;
+                plc->frame_duration = server_frame_duration_;
+                plc->payload.clear();  // 空 payload = PLC 标记
+                on_incoming_audio_(std::move(plc));
+            }
+        }
+    }
+    last_seq_ = seq;
+    last_seq_valid_ = (seq != 0);  // seq=0 可能是旧服务端，不启用检测
+
+    // 正常音频帧（原有逻辑不变）
+    rx_frame_count_++;
+    // ...
+}
+```
+
+#### 14.3.3 解码端：识别 PLC 包调用 Opus 原生补偿
+
+```cpp
+// opus_decoder.h - 新增 PLC 方法
+bool DecodePLC(std::vector<int16_t>& pcm);
+
+// opus_decoder.cc - PLC 实现
+bool OpusDecoderWrapper::DecodePLC(std::vector<int16_t>& pcm) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (audio_dec_ == nullptr) return false;
+
+    pcm.resize(frame_size_);
+    // Opus RFC 6716 §4.3: 传入 NULL 数据，解码器基于前帧频谱外推生成平滑过渡帧
+    // 计算量约 0.3ms/帧，远低于正常解码的 1-2ms
+    auto ret = opus_decode(audio_dec_, NULL, 0, pcm.data(), pcm.size(), 0);
+    if (ret < 0) {
+        ESP_LOGE(TAG, "PLC decode failed: %d", ret);
+        return false;
+    }
+    pcm.resize(ret);
+    return true;
+}
+
+// audio_service.cc - OpusCodecTask() 解码分支
+if (!audio_decode_queue_.empty() && audio_playback_queue_.size() < MAX_PLAYBACK_TASKS_IN_QUEUE) {
+    auto packet = std::move(audio_decode_queue_.front());
+    audio_decode_queue_.pop_front();
+    audio_queue_cv_.notify_all();
+    lock.unlock();
+
+    auto task = std::make_unique<AudioTask>();
+    task->type = kAudioTaskTypeDecodeToPlaybackQueue;
+
+    SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
+
+    bool decoded = false;
+    if (packet->payload.empty()) {
+        // PLC 模式：空 payload = 丢包补偿
+        decoded = opus_decoder_->DecodePLC(task->pcm);
+        if (decoded) debug_statistics_.plc_count++;
+    } else {
+        // 正常解码（原有逻辑）
+        decoded = opus_decoder_->Decode(std::move(packet->payload), task->pcm);
+    }
+
+    if (decoded) {
+        // 重采样逻辑不变...
+        lock.lock();
+        audio_playback_queue_.push_back(std::move(task));
+        audio_queue_cv_.notify_all();
+    } else {
+        ESP_LOGE(TAG, "Failed to decode audio");
+        lock.lock();
+    }
+    debug_statistics_.decode_count++;
+}
+```
+
+#### 14.3.4 兜底：无序列号时的低水位 PLC
+
+即使服务端未升级（sequence 恒为 0），设备端仍可在 buffer underrun 时主动生成 PLC 帧：
+
+```cpp
+// audio_service.cc - OpusCodecTask() 中，所有队列检查之后追加
+// 当 decode_queue 空、正在播放、还没收到 AUDIO_END → 可能丢包或网络抖动
+if (audio_decode_queue_.empty() &&
+    playback_controller_.GetState() == PlaybackController::PLAYING &&
+    !playback_controller_.IsAudioEndReceived() &&
+    audio_playback_queue_.size() < 2) {
+    // 主动生成 PLC 帧填充，避免 underrun 爆音
+    lock.unlock();
+    auto task = std::make_unique<AudioTask>();
+    task->type = kAudioTaskTypeDecodeToPlaybackQueue;
+    if (opus_decoder_->DecodePLC(task->pcm)) {
+        lock.lock();
+        audio_playback_queue_.push_back(std::move(task));
+        audio_queue_cv_.notify_all();
+        debug_statistics_.plc_count++;
+    } else {
+        lock.lock();
+    }
+}
+```
+
+**效果**: 丢包时听感从"咔嗒/爆音"变为"短暂衰减"，Opus PLC 生成的过渡帧能保持频谱连续性。
+
+### 14.4 改动二：快速打断（FlushPipeline）（~30 行）
+
+#### 14.4.1 问题
+
+当前 abort 路径（`SendAbortSpeaking()`）通知服务端停止发送后，本地仍有最多 12 秒缓冲数据在管线中。PlaybackController 必须等 DRAINING → queue empty → COMPLETE 才能回到 IDLE，用户体感延迟 1-2 秒。
+
+#### 14.4.2 方案：原子级管线清空
+
+```cpp
+// audio_service.h - 新增接口
+void FlushPipeline();
+
+// audio_service.cc
+void AudioService::FlushPipeline() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+
+    size_t d = audio_decode_queue_.size();
+    size_t p = audio_playback_queue_.size();
+
+    audio_decode_queue_.clear();
+    audio_playback_queue_.clear();
+
+    // 重置 Opus 解码器内部状态，否则下次播放首帧有残余频谱
+    opus_decoder_->ResetState();
+    // 重置播放控制器状态机
+    playback_controller_.Reset();
+
+    ESP_LOGI(TAG, "Pipeline flushed: decode=%d, playback=%d", (int)d, (int)p);
+    audio_queue_cv_.notify_all();
+}
+```
+
+#### 14.4.3 清空 I2S DMA 缓冲
+
+软件队列清了，但 I2S DMA 描述符链中还有约 12 × 320 帧的 PCM 数据正在输出。利用 ESP-IDF I2S 驱动特性：
+
+```cpp
+// box_audio_codec.h - 新增
+void FlushOutput();
+
+// box_audio_codec.cc
+void BoxAudioCodec::FlushOutput() {
+    if (tx_handle_) {
+        // disable 重置 DMA 描述符链，enable 重新开始
+        // 整个操作 < 1ms，立即停止音频输出
+        i2s_channel_disable(tx_handle_);
+        i2s_channel_enable(tx_handle_);
+    }
+}
+```
+
+#### 14.4.4 集成到 abort 路径
+
+```cpp
+// application.cc - AbortSpeaking 或唤醒词打断时
+void Application::AbortSpeaking(AbortReason reason) {
+    protocol_->SendAbortSpeaking(reason);
+
+    // 立即清空管线（不等 drain）
+    audio_service_.FlushPipeline();
+    codec_->FlushOutput();   // 清空 I2S DMA
+
+    // 恢复心跳（audio_streaming_ 还是 true，需要手动重置）
+    protocol_->SetAudioStreaming(false);
+
+    // 直接转换状态，不等 COMPLETE
+    SetDeviceState(kDeviceStateListening);
+}
+```
+
+**效果**: 打断延迟从 1-2 秒降至 < 50ms（一次 I2S disable/enable 周期）。
+
+### 14.5 改动三：智能心跳保活（~30 行）
+
+#### 14.5.1 问题
+
+`websocket_protocol.cc:57` 在 `audio_streaming_ = true` 时完全跳过 Ping。4G 运营商 NAT 超时 10-30 秒，如果服务端 TTS 生成间隙超过这个时间，连接会被运营商静默断开。更严重的是：如果 AUDIO_END 帧在网络中丢失，设备会永久卡在 `audio_streaming_ = true`。
+
+#### 14.5.2 方案 A（设备端）：基于 RX 活跃度的智能心跳
+
+核心洞察：**播放期间设备在接收数据，TCP 双向数据本身就能维持 NAT 映射。只需在数据断流时补发 Ping。**
+
+```cpp
+// websocket_protocol.cc - 替换原 OnHeartbeatTimer()
+void WebsocketProtocol::OnHeartbeatTimer() {
+    auto now = std::chrono::steady_clock::now();
+    auto since_last_rx = std::chrono::duration_cast<std::chrono::seconds>(
+        now - last_incoming_time_).count();
+
+    if (audio_streaming_) {
+        if (since_last_rx < HEARTBEAT_INTERVAL_MS / 1000) {
+            // 近期有收到数据，NAT 映射存活，不需要 Ping
+            return;
+        }
+
+        // 数据断流，可能是：
+        // a) 服务端 LLM 还在生成（正常，发 Ping 保活）
+        // b) AUDIO_END 丢失（异常，需要超时恢复）
+        if (since_last_rx < 15) {
+            // 8-15 秒无数据：发探测 Ping 保持 NAT
+            ESP_LOGW(TAG, "No RX for %llds during streaming, sending keepalive ping",
+                     (long long)since_last_rx);
+            if (websocket_ && websocket_->IsConnected()) {
+                websocket_->Ping();
+            }
+        } else {
+            // >15 秒无数据：认定 AUDIO_END 丢失，强制结束
+            ESP_LOGE(TAG, "No RX for %llds, AUDIO_END likely lost, forcing stream end",
+                     (long long)since_last_rx);
+            audio_streaming_ = false;
+
+            // 合成一个 AUDIO_END 事件，驱动状态机恢复
+            if (on_incoming_json_ != nullptr) {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "type", "tts");
+                cJSON_AddStringToObject(root, "state", "stop");
+                on_incoming_json_(root);
+                cJSON_Delete(root);
+            }
+        }
+        return;
+    }
+
+    // 非音频期间：正常心跳（原有逻辑）
+    if (websocket_ && websocket_->IsConnected()) {
+        websocket_->Ping();
+    }
+}
+```
+
+#### 14.5.3 方案 B（服务端配合）：服务端主动 Ping
+
+让服务端作为 Ping 发起方，设备只需被动回复 Pong。ML307 的 WebSocket 实现（`web_socket.cc:391`）已有自动 Pong：
+
+```cpp
+// ML307 web_socket.cc - 已有代码，无需修改
+case 0x9: // Ping from server
+    std::thread([this, payload, payload_length]() {
+        SendControlFrame(0xA, payload.data(), payload_length);  // 自动 Pong
+    }).detach();
+```
+
+服务端只需修改启动参数：
+
+```bash
+# 当前（禁用 Ping）：
+uvicorn ... --ws-ping-interval 0 --ws-ping-timeout 300
+
+# 改为（每 10 秒 Ping，30 秒超时）：
+uvicorn ... --ws-ping-interval 10 --ws-ping-timeout 30
+```
+
+**注意**: 方案 A 和方案 B 应同时实施。方案 A 保护设备端不因 AUDIO_END 丢失卡死，方案 B 保证 NAT 映射在所有阶段都不过期。
+
+### 14.6 实施优先级
+
+| 优先级 | 改动 | 涉及文件 | 行数 | 效果 |
+|--------|------|----------|------|------|
+| **P0** | 智能心跳（14.5.2） | `websocket_protocol.cc` | ~30 | 解决 NAT 超时 + AUDIO_END 丢失卡死 |
+| **P0** | FlushPipeline（14.4） | `audio_service.cc/h`, `application.cc` | ~30 | 打断延迟 1-2s → <50ms |
+| **P1** | 低水位 PLC（14.3.4） | `opus_decoder.cc/h`, `audio_service.cc` | ~20 | 无需协议修改即可缓解丢包爆音 |
+| **P2** | 序列号 + 精确 PLC（14.3.2-3） | `websocket_protocol.cc`, 服务端 | ~30 | 精确丢包检测和恢复 |
+| **P3** | 服务端 Ping（14.5.3） | `xiaozhi-server` 启动参数 | 1 | 根本解决保活问题 |
+| **P4** | 服务端 In-band FEC | 服务端 Opus 编码配置 | ~5 | 最高质量丢包恢复 |
+
+P0 项可独立实施，不依赖服务端修改，纯设备端改动。
+
+### 14.7 验证方法
+
+```bash
+# 1. PLC 生效验证 — 观察日志中的 PLC 计数
+timeout 60 cat /dev/ttyACM0 | grep -E "plc_count|Packet loss detected"
+
+# 2. FlushPipeline 验证 — 播放中按键打断，观察延迟
+timeout 30 cat /dev/ttyACM0 | grep -E "Pipeline flushed|FlushOutput"
+
+# 3. 智能心跳验证 — 长时间播放后观察心跳行为
+timeout 120 cat /dev/ttyACM0 | grep -E "keepalive ping|AUDIO_END likely lost|heartbeat"
+
+# 4. 序列号验证 — 对比服务端发送帧数 vs 设备接收帧数
+# 服务端日志:
+journalctl -u xiaozhi-server | grep "Sent .* Opus frames"
+# 设备端日志:
+timeout 60 cat /dev/ttyACM0 | grep "AUDIO RX STATS"
+```
+
+### 14.8 内存影响评估
+
+| 改动 | 内存变化 |
+|------|----------|
+| PLC（DecodePLC 方法） | +0 字节（复用已有 pcm buffer） |
+| 序列号（uint8_t × 2） | +2 字节 |
+| FlushPipeline | +0 字节（只是 clear 操作） |
+| 智能心跳 | +0 字节（复用已有 last_incoming_time_） |
+| **总计** | **+2 字节** |
+
+## 15. 参考资料
 
 - [ESP-ADF GitHub](https://github.com/espressif/esp-adf)
 - [xiaozhi-esp32 GitHub](https://github.com/78/xiaozhi-esp32)

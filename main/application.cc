@@ -835,6 +835,7 @@ void Application::AbortSpeaking(AbortReason reason) {
     ESP_LOGI(TAG, "Abort speaking");
     aborted_ = true;
     protocol_->SendAbortSpeaking(reason);
+    audio_service_.FlushPipeline();
 }
 
 void Application::SetListeningMode(ListeningMode mode) {

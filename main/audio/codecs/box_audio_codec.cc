@@ -240,3 +240,12 @@ int BoxAudioCodec::Write(const int16_t* data, int samples) {
     }
     return samples;
 }
+
+void BoxAudioCodec::FlushOutput() {
+    // 利用 I2S 驱动特性：disable 重置 DMA 描述符链，enable 重新开始
+    // 效果是清空 DMA 缓冲区中的残留音频数据，用于打断时快速消音
+    if (tx_handle_) {
+        i2s_channel_disable(tx_handle_);
+        i2s_channel_enable(tx_handle_);
+    }
+}

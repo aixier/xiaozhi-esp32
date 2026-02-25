@@ -97,6 +97,7 @@ struct DebugStatistics {
     uint32_t decode_count = 0;
     uint32_t encode_count = 0;
     uint32_t playback_count = 0;
+    uint32_t plc_count = 0;
 };
 
 class AudioService {
@@ -127,6 +128,7 @@ public:
     void PlaySound(const std::string_view& sound);
     bool ReadAudioData(std::vector<int16_t>& data, int sample_rate, int samples);
     void ResetDecoder();
+    void FlushPipeline();
 
     // 预缓冲控制
     void StartPrebuffering();  // 收到 AUDIO_START 时调用
@@ -171,6 +173,7 @@ private:
     // 预缓冲控制：收到足够音频数据后再开始播放，避免断断续续
     // 4G 网络抖动可达 2 秒以上，需要足够的预缓冲来平滑播放
     AudioState audio_state_ = AudioState::IDLE;
+    bool audio_end_received_ = false;
 
     esp_timer_handle_t audio_power_timer_ = nullptr;
     std::chrono::steady_clock::time_point last_input_time_;

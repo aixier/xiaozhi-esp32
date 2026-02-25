@@ -413,8 +413,19 @@ void AudioService::OpusCodecTask() {
             task->timestamp = packet->timestamp;
 
             SetDecodeSampleRate(packet->sample_rate, packet->frame_duration);
-            if (opus_decoder_->Decode(std::move(packet->payload), task->pcm)) {
-                // Resample if the sample rate is different
+
+            // 判断是否为 PLC 标记包 (空 payload = 序列号检测到的丢包)
+            bool decoded = false;
+            if (packet->payload.empty()) {
+                // PLC 模式：空 payload = 丢包补偿帧
+                decoded = opus_decoder_->DecodePLC(task->pcm);
+                if (decoded) debug_statistics_.plc_count++;
+            } else {
+                // 正常解码
+                decoded = opus_decoder_->Decode(std::move(packet->payload), task->pcm);
+            }
+
+            if (decoded) {
                 // Resample if the sample rate is different
                 if (opus_decoder_->sample_rate() != codec_->output_sample_rate()) {
                     int target_size = output_resampler_.GetOutputSamples(task->pcm.size());
@@ -434,7 +445,25 @@ void AudioService::OpusCodecTask() {
             }
             debug_statistics_.decode_count++;
         }
-        
+
+        /* PLC: generate concealment frame when buffer is running low */
+        if (audio_decode_queue_.empty() &&
+            audio_playback_queue_.size() < 2 &&
+            (audio_state_ == AudioState::PLAYING || audio_state_ == AudioState::REBUFFERING) &&
+            !audio_end_received_) {
+            lock.unlock();
+            auto task = std::make_unique<AudioTask>();
+            task->type = kAudioTaskTypeDecodeToPlaybackQueue;
+            if (opus_decoder_->DecodePLC(task->pcm)) {
+                lock.lock();
+                audio_playback_queue_.push_back(std::move(task));
+                audio_queue_cv_.notify_all();
+                debug_statistics_.plc_count++;
+            } else {
+                lock.lock();
+            }
+        }
+
         /* Encode the audio to send queue */
         if (!audio_encode_queue_.empty() && audio_send_queue_.size() < MAX_SEND_PACKETS_IN_QUEUE) {
             auto task = std::move(audio_encode_queue_.front());
@@ -520,6 +549,18 @@ void AudioService::PushTaskToEncodeQueue(AudioTaskType type, std::vector<int16_t
                  (unsigned long)esp_get_free_heap_size());
     }
 
+    audio_queue_cv_.notify_all();
+}
+
+void AudioService::FlushPipeline() {
+    std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    size_t d = audio_decode_queue_.size();
+    size_t p = audio_playback_queue_.size();
+    audio_decode_queue_.clear();
+    audio_playback_queue_.clear();
+    opus_decoder_->ResetState();
+    audio_state_ = AudioState::IDLE;
+    ESP_LOGI(TAG, "Pipeline flushed: decode=%d, playback=%d", (int)d, (int)p);
     audio_queue_cv_.notify_all();
 }
 
@@ -687,6 +728,7 @@ void AudioService::ResetDecoder() {
     audio_playback_queue_.clear();
     audio_testing_queue_.clear();
     audio_state_ = AudioState::IDLE;
+    audio_end_received_ = false;
     audio_queue_cv_.notify_all();
 }
 
@@ -710,10 +752,12 @@ void AudioService::StartPrebuffering() {
     ESP_LOGI(TAG, "Starting prebuffer, waiting for %d frames (%d ms)",
              BUFFER_START_THRESHOLD_FRAMES, BUFFER_START_THRESHOLD_FRAMES * OPUS_FRAME_DURATION_MS);
     audio_state_ = AudioState::BUFFERING;
+    audio_end_received_ = false;
 }
 
 void AudioService::StopPrebuffering() {
     std::lock_guard<std::mutex> lock(audio_queue_mutex_);
+    audio_end_received_ = true;
     if (audio_state_ == AudioState::BUFFERING || audio_state_ == AudioState::REBUFFERING) {
         ESP_LOGI(TAG, "Audio end received, stop prebuffering (may have insufficient data)");
         audio_state_ = AudioState::PLAYING;

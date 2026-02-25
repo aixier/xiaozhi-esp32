@@ -53,14 +53,39 @@ void WebsocketProtocol::StopHeartbeat() {
 }
 
 void WebsocketProtocol::OnHeartbeatTimer() {
-    // 音频流传输中时暂停心跳，避免 AT+MIPSEND 阻塞 URC 接收导致丢包
+    auto now = std::chrono::steady_clock::now();
+    auto since_last_rx = std::chrono::duration_cast<std::chrono::seconds>(
+        now - last_incoming_time_).count();
+
     if (audio_streaming_) {
-        ESP_LOGD(TAG, "Skipping heartbeat during audio streaming");
+        if (since_last_rx < HEARTBEAT_INTERVAL_MS / 1000) {
+            return;  // 近期有数据，NAT 存活
+        }
+        if (since_last_rx < 15) {
+            // 数据断流 8-15 秒：补发 Ping 保活
+            ESP_LOGW(TAG, "No RX for %llds during streaming, sending keepalive ping",
+                     (long long)since_last_rx);
+            if (websocket_ && websocket_->IsConnected()) {
+                websocket_->Ping();
+            }
+        } else {
+            // >15 秒无数据：AUDIO_END 丢失，强制结束
+            ESP_LOGE(TAG, "No RX for %llds, forcing stream end", (long long)since_last_rx);
+            audio_streaming_ = false;
+            if (on_incoming_json_) {
+                cJSON* root = cJSON_CreateObject();
+                cJSON_AddStringToObject(root, "type", "tts");
+                cJSON_AddStringToObject(root, "state", "stop");
+                on_incoming_json_(root);
+                cJSON_Delete(root);
+            }
+        }
         return;
     }
+
+    // 非音频期间：正常心跳
     if (websocket_ && websocket_->IsConnected()) {
         websocket_->Ping();
-        ESP_LOGD(TAG, "Sent WebSocket ping");
     }
 }
 
@@ -196,7 +221,32 @@ bool WebsocketProtocol::OpenAudioChannel() {
                 // 0x0F: ERROR
 
                 if (msg_type == 0x11) {
-                    // AUDIO_DATA: 音频数据 - 统计帧信息
+                    uint8_t seq = bp3->reserved;  // reserved 字段复用为序列号
+
+                    // 序列号间隙检测（seq=0 可能是旧服务端未升级，跳过检测）
+                    if (last_seq_valid_ && seq != 0) {
+                        uint8_t expected = (last_seq_ + 1) & 0xFF;
+                        int lost = (seq - expected) & 0xFF;
+                        if (lost > 0 && lost < 10) {
+                            ESP_LOGW(TAG, "Packet loss: expected=%d got=%d lost=%d",
+                                     expected, seq, lost);
+                            for (int i = 0; i < lost; i++) {
+                                if (on_incoming_audio_ != nullptr) {
+                                    auto plc = std::make_unique<AudioStreamPacket>(AudioStreamPacket{
+                                        .sample_rate = server_sample_rate_,
+                                        .frame_duration = server_frame_duration_,
+                                        .timestamp = 0,
+                                        .payload = std::vector<uint8_t>()  // 空 payload = PLC 标记
+                                    });
+                                    on_incoming_audio_(std::move(plc));
+                                }
+                            }
+                        }
+                    }
+                    last_seq_ = seq;
+                    last_seq_valid_ = (seq != 0);
+
+                    // AUDIO_DATA: 音频数据 - 统计帧信息（原有逻辑保持不变）
                     rx_frame_count_++;
                     rx_total_bytes_ += payload_size;
 
@@ -245,6 +295,9 @@ bool WebsocketProtocol::OpenAudioChannel() {
                         cJSON_Delete(root);
                     }
                 } else if (msg_type == 0x10) {
+                    // 重置序列号状态
+                    last_seq_ = 0;
+                    last_seq_valid_ = false;
                     // AUDIO_START: 音频开始 - 重置帧统计，暂停心跳
                     rx_frame_count_ = 0;
                     rx_total_bytes_ = 0;

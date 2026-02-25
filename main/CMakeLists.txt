@@ -25,6 +25,8 @@ set(SOURCES "core/event_bus.cc"
             "protocols/protocol.cc"
             "protocols/mqtt_protocol.cc"
             "protocols/websocket_protocol.cc"
+            "emotion/emotion_storage.cc"
+            "emotion/emotion_downloader.cc"
             "mcp_server.cc"
             "system_info.cc"
             "application.cc"
@@ -34,7 +36,7 @@ set(SOURCES "core/event_bus.cc"
             "main.cc"
             )
 
-set(INCLUDE_DIRS "." "core" "network" "display" "audio" "protocols")
+set(INCLUDE_DIRS "." "core" "network" "display" "audio" "protocols" "emotion")
 
 # 添加板级公共文件
 file(GLOB BOARD_COMMON_SOURCES ${CMAKE_CURRENT_SOURCE_DIR}/boards/common/*.cc)

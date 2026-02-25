@@ -108,6 +108,11 @@ public:
      */
     bool CanStartPlayback() const;
 
+    /**
+     * 检查是否已收到 AUDIO_END
+     */
+    bool IsAudioEndReceived() const { return audio_end_received_; }
+
 private:
     /**
      * 检查播放完成

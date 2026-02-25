@@ -32,6 +32,9 @@ public:
     virtual void SetOutputVolume(int volume) override;
     virtual void EnableInput(bool enable) override;
     virtual void EnableOutput(bool enable) override;
+
+    // 快速清空 I2S DMA 输出缓冲区，用于打断时消除残留音频
+    void FlushOutput();
 };
 
 #endif // _BOX_AUDIO_CODEC_H

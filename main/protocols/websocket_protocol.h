@@ -46,6 +46,10 @@ private:
     static const int HEARTBEAT_INTERVAL_MS = 8000;  // 8 秒发送一次 ping
     bool audio_streaming_ = false;  // 音频流传输中时暂停心跳
 
+    // 序列号丢包检测 (服务端在 reserved 字段填入递增序列号)
+    uint8_t last_seq_ = 0;
+    bool last_seq_valid_ = false;
+
     void StartHeartbeat();
     void StopHeartbeat();
     void OnHeartbeatTimer();

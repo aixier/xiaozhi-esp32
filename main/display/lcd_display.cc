@@ -15,6 +15,7 @@
 #include <vector>
 
 #include "board.h"
+#include "emotion/emotion_storage.h"
 
 #define TAG "LcdDisplay"
 
@@ -634,10 +635,6 @@ void LcdDisplay::SetEmotion(const char* emotion) {
         {&confused, "confused"}
     };
 #endif
-    // 查找匹配的表情
-    std::string_view emotion_view(emotion);
-    auto it = std::find_if(emotions.begin(), emotions.end(),
-        [&emotion_view](const Emotion& e) { return e.text == emotion_view; });
 
     DisplayLockGuard lock(this);
     if (gif_label_ == nullptr) {
@@ -645,18 +642,39 @@ void LcdDisplay::SetEmotion(const char* emotion) {
         return;
     }
 
-    if (it != emotions.end()) {
-        ESP_LOGD(TAG, "SetEmotion: found matching emotion '%s', setting GIF src=%p",
-                 it->text, it->gif);
-        lv_gif_set_src(gif_label_, it->gif);
-    } else {
-        ESP_LOGW(TAG, "SetEmotion: unknown emotion '%s', using default", emotion);
+    // 检查是否请求自定义表情
+    if (strcmp(emotion, "custom") == 0) {
+        auto& storage = EmotionStorage::GetInstance();
+        if (storage.HasCustomEmotion()) {
+            ESP_LOGI(TAG, "SetEmotion: loading custom emotion from SPIFFS: %s", storage.GetLvglPath());
+            lv_gif_set_src(gif_label_, storage.GetLvglPath());
+        } else {
+            ESP_LOGW(TAG, "SetEmotion: custom emotion requested but not found, using default");
 #if CONFIG_USE_LCD_240X240_GIF1 || CONFIG_USE_LCD_160X160_GIF1
-        lv_gif_set_src(gif_label_, &happy);
+            lv_gif_set_src(gif_label_, &happy);
 #else
-        lv_gif_set_src(gif_label_, &neutral);
+            lv_gif_set_src(gif_label_, &neutral);
 #endif
-    } 
+        }
+    } else {
+        // 查找匹配的内置表情
+        std::string_view emotion_view(emotion);
+        auto it = std::find_if(emotions.begin(), emotions.end(),
+            [&emotion_view](const Emotion& e) { return e.text == emotion_view; });
+
+        if (it != emotions.end()) {
+            ESP_LOGD(TAG, "SetEmotion: found matching emotion '%s', setting GIF src=%p",
+                     it->text, it->gif);
+            lv_gif_set_src(gif_label_, it->gif);
+        } else {
+            ESP_LOGW(TAG, "SetEmotion: unknown emotion '%s', using default", emotion);
+#if CONFIG_USE_LCD_240X240_GIF1 || CONFIG_USE_LCD_160X160_GIF1
+            lv_gif_set_src(gif_label_, &happy);
+#else
+            lv_gif_set_src(gif_label_, &neutral);
+#endif
+        }
+    }
 
     // 显示GIF表情，隐藏preview_image_
     lv_obj_clear_flag(gif_label_, LV_OBJ_FLAG_HIDDEN);
